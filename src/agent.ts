@@ -223,7 +223,8 @@ export class ChatAgent {
       const mood = loadMood(paths, config);
       const room = loadRoom(paths);
       const reminders = pendingReminders(paths);
-      const todaySummary = timelineSummary(paths, config, day);
+      // 补跑时 now 是原计划的时刻：别让她看到那之后才发生的事。
+      const todaySummary = timelineSummary(paths, config, day, 14, now);
       const recalls = memory.recall(text, 3);
       const justRemembered = memory.recentInbox(4);
       const stickers = ensureStickers(paths);
@@ -383,6 +384,7 @@ export class ChatAgent {
   async runOwnTime(
     now: number,
     windowEnd: number,
+    opts: { catchUp?: boolean } = {},
   ): Promise<{ ok: boolean; summary: string; shares: string[]; error?: string; errorKind?: LLMFailureKind | "aborted"; errorCode?: string }> {
     const { config, paths, memory } = this.ctx;
     if (this.holding) return { ok: false, summary: "", shares: [], error: "连发中，先等她收完。" };
@@ -484,6 +486,7 @@ export class ChatAgent {
         now,
         outbox,
         tellOwner,
+        catchUp: Boolean(opts.catchUp),
       };
       const result = await runToolLoop({
         config,
@@ -552,17 +555,29 @@ ${body}` },
     }
   }
 
-  async say(text: string, proactive = true): Promise<void> {
+  async say(
+    text: string,
+    proactive = true,
+    at: number = Date.now(),
+    opts: { silent?: boolean; catchUp?: boolean } = {},
+  ): Promise<void> {
     const clean = text.trim();
     if (!clean) return;
-    this.emit({ type: "typing", on: true });
-    await sleep(Math.min(1800, 400 + clean.length * 35));
-    this.emit({ type: "typing", on: false });
+    if (!opts.silent) {
+      this.emit({ type: "typing", on: true });
+      await sleep(Math.min(1800, 400 + clean.length * 35));
+      this.emit({ type: "typing", on: false });
+    }
+    const meta: Record<string, unknown> = {};
+    if (proactive) meta.proactive = true;
+    if (opts.silent) meta.silent = true;
+    if (opts.catchUp) meta.catchUp = true;
     const msg = appendChatMessage(this.ctx.paths, this.ctx.config, {
       role: "assistant",
       kind: "text",
       text: clean,
-      meta: proactive ? { proactive: true } : undefined,
+      ts: at,
+      meta: Object.keys(meta).length ? meta : undefined,
     });
     this.emit({ type: "message", message: msg });
     this.sentInTurn = true;

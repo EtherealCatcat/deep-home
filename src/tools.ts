@@ -29,6 +29,8 @@ export interface ToolContext {
    * 返回一句诚实的回执，让模型知道到底说没说出去。
    */
   tellOwner?: (text: string) => string;
+  /** 补跑：现在是“原计划时刻”，用来拒绝算不出绝对时间的说法。 */
+  catchUp?: boolean;
 }
 
 interface ToolDefinition {
@@ -165,6 +167,10 @@ const TOOLS: ToolDefinition[] = [
     run(ctx, args) {
       const text = str(args, "text");
       const at = str(args, "at");
+      // 补跑时“20 分钟后”会以原计划时刻为基准算出一个早就过去的提醒，不如让她说具体时间。
+      if (ctx.catchUp && /(\d+|几)\s*(分钟|个小时|小时|天)后/.test(at)) {
+        return "（补记的时候没法定“几分钟后”，换一个具体时间。）";
+      }
       const dueAt = parseDue(at, ctx.config, ctx.now);
       if (!text || !dueAt) return "时间没听懂，换个说法再告诉我。";
       const kind = (str(args, "kind") || (ctx.scene === "own" ? "care" : "owner")) as "owner" | "care";

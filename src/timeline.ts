@@ -17,7 +17,8 @@ export function appendTimeline(p: Paths, config: AppConfig, event: Omit<Timeline
 }
 
 export function readTimeline(p: Paths, day: string): TimelineEvent[] {
-  return readJsonl<TimelineEvent>(timelineFile(p, day));
+  // 补跑会按计划时刻把事件写进已有文件，按 ts 排一下才知道先后。
+  return readJsonl<TimelineEvent>(timelineFile(p, day)).sort((a, b) => a.ts - b.ts);
 }
 
 const HIDDEN_KINDS = new Set(["resume_gap"]);
@@ -85,8 +86,14 @@ const LABELS: Record<string, string> = {
   memory: "记忆",
 };
 
-export function timelineSummary(p: Paths, config: AppConfig, day: string, limit = 14): string {
-  const events = readTimelineForDisplay(p, config, day);
+export function timelineSummary(
+  p: Paths,
+  config: AppConfig,
+  day: string,
+  limit = 14,
+  before = Number.POSITIVE_INFINITY,
+): string {
+  const events = readTimelineForDisplay(p, config, day).filter((event) => event.ts <= before);
   if (!events.length) return "今天还没发生什么。";
   const lines = events.slice(-limit).map((event) => {
     const label = LABELS[event.kind] ?? event.kind;

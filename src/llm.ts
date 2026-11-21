@@ -57,6 +57,30 @@ export function getLastLLMFailure(): LLMFailureRecord | null {
   return lastFailure;
 }
 
+/**
+ * 断网预检：拿到任意 HTTP 响应就算网络可达（401/404/5xx 都行）。
+ * 200 但不是 JSON 通常是接住了 captive portal，当作离线，交给下一轮重试。
+ * 这个请求不计费、不打印 Key。
+ */
+export async function probeOnline(config: AppConfig, timeoutMs = 3000): Promise<boolean> {
+  const base = config.model.baseUrl.trim().replace(/\/+$/, "");
+  if (!base) return false;
+  try {
+    const response = await fetch(`${base}/models`, {
+      method: "GET",
+      headers: config.model.apiKey.trim() ? { Authorization: `Bearer ${config.model.apiKey}` } : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (response.status === 200) {
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("json")) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function endpoint(baseUrl: string): string {
   const base = baseUrl.trim().replace(/\/+$/, "");
   if (base.endsWith("/chat/completions")) return base;

@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { DEFAULT_CONFIG } from "../src/config.js";
-import { groupTimelineEvents } from "../src/timeline.js";
+import { ensureLayout, paths } from "../src/config.js";
+import { appendTimeline, groupTimelineEvents, readTimeline, timelineSummary } from "../src/timeline.js";
 import type { TimelineEvent } from "../src/types.js";
 
 const config = structuredClone(DEFAULT_CONFIG);
@@ -47,5 +51,40 @@ describe("timeline display grouping", () => {
     const result = groupTimelineEvents(events, config);
     expect(result).toHaveLength(1);
     expect(result[0].text).toBe("和主人聊了 1 轮，约 12 字");
+  });
+});
+
+describe("timeline ordering", () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  function setup() {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "deephome-timeline-"));
+    roots.push(root);
+    const p = paths(root);
+    ensureLayout(p);
+    return p;
+  }
+
+  it("sorts by timestamp when a catch-up writes an earlier moment", () => {
+    const p = setup();
+    appendTimeline(p, config, { kind: "room", text: "中午", ts: at(0) });
+    appendTimeline(p, config, { kind: "room", text: "下午", ts: at(60) });
+    appendTimeline(p, config, { kind: "room", text: "补写的早上", ts: at(-120) });
+
+    expect(readTimeline(p, "2026-11-18").map((item) => item.text)).toEqual(["补写的早上", "中午", "下午"]);
+  });
+
+  it("only summarizes events up to the planned moment", () => {
+    const p = setup();
+    appendTimeline(p, config, { kind: "room", text: "九点的事", ts: at(0) });
+    appendTimeline(p, config, { kind: "room", text: "十点以后", ts: at(60) });
+
+    const summary = timelineSummary(p, config, "2026-11-18", 14, at(10));
+    expect(summary).toContain("九点的事");
+    expect(summary).not.toContain("十点以后");
   });
 });

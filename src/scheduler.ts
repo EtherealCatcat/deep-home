@@ -17,17 +17,23 @@ import { dayKey, formatClock, humanGap, nextClockTs, zonedParts } from "./time.j
 import { appendTimeline } from "./timeline.js";
 import { addMilestone } from "./relationship.js";
 import {
+  CATCHUP_HORIZON_MS,
+  CATCHUP_MAX_UNKNOWN_ATTEMPTS,
   canShareNow,
+  catchUpBackoff,
+  createPendingCatchUp,
   ensureOwnSchedule,
+  isInfraFailure,
   loadOwn,
+  markCatchUpDone,
   markOwnEnd,
   markOwnStart,
   queueShare,
   resetShareDay,
   saveOwn,
-  scheduleOwnRetry,
   takeFreshShares,
 } from "./own.js";
+import { probeOnline } from "./llm.js";
 
 export interface SchedulerContext {
   config: AppConfig;
@@ -96,61 +102,69 @@ export class Scheduler {
     saveLife(paths, life);
 
     const rhythm = getRhythm(config, life, now);
-    const policy = costPolicy(config, todayUsage(paths, config), now);
-
-    await this.processDeferred(now, policy, rhythm);
-
-    life = loadLife(paths);
-    const diaryDay = config.life.diaryEnabled ? diaryTarget(config, life.lastDiary, now) : null;
-    if (diaryDay && !agent.busy) {
-      if (policy.allowDiary) {
-        const ok = await writeDiary(diaryDay, {
-          config,
-          paths,
-          memory: this.ctx.memory,
-          persona: this.ctx.persona,
-          emit,
-          onChange,
-        });
-        if (!ok) {
-          // No activity, or a transient failure: diaryTarget will retry later.
-        }
-      } else {
-        addDeferred(paths, { kind: "diary", runAfter: policy.nextChangeAt, payload: { day: diaryDay } });
-      }
-    }
-
-    life = loadLife(paths);
-    if (
-      life.lastDiary &&
-      life.lastConsolidate !== life.lastDiary &&
-      hasInbox(paths) &&
-      !agent.busy
-    ) {
-      if (policy.allowConsolidation) {
-        await consolidateMemory(life.lastDiary, {
-          config,
-          paths,
-          memory: this.ctx.memory,
-          emit,
-          onChange,
-        });
-      } else {
-        addDeferred(paths, { kind: "consolidate", runAfter: policy.nextChangeAt, payload: { day: life.lastDiary } });
-      }
-    }
 
     if (!agent.isHolding()) await this.fireReminders(now, rhythm);
 
-    // 先把昨晚静默期记下的话补发掉，再考虑新的自己的时间；两条主动消息不要同一分钟抢着说。
-    const flushed = await this.flushPendingShares(now, rhythm);
-    this.maybeDecayRoom(now);
-
+    // 自己的时间先跑：它可能决定这一轮要不要补跑，日记/整理也得等它落定。
     if (config.web.ownTimeEnabled && !agent.busy) {
-      await this.maybeOwnTime(now, rhythm, policy);
+      await this.maybeOwnTime(now, rhythm);
+    }
+    await this.maybeCatchUp(now);
+
+    const pending = Boolean(loadOwn(paths).pendingCatchUp);
+    let policy = costPolicy(config, todayUsage(paths, config), now);
+
+    // 有待补跑的窗口时，先别写今天的日记/整理；补跑回来后那才是“今天”的完整记录。
+    if (!pending) {
+      await this.processDeferred(now, policy, rhythm);
+
+      life = loadLife(paths);
+      const diaryDay = config.life.diaryEnabled ? diaryTarget(config, life.lastDiary, now) : null;
+      if (diaryDay && !agent.busy) {
+        if (policy.allowDiary) {
+          const ok = await writeDiary(diaryDay, {
+            config,
+            paths,
+            memory: this.ctx.memory,
+            persona: this.ctx.persona,
+            emit,
+            onChange,
+          });
+          if (!ok) {
+            // No activity, or a transient failure: diaryTarget will retry later.
+          }
+        } else {
+          addDeferred(paths, { kind: "diary", runAfter: policy.nextChangeAt, payload: { day: diaryDay } });
+        }
+      }
+
+      life = loadLife(paths);
+      if (
+        life.lastDiary &&
+        life.lastConsolidate !== life.lastDiary &&
+        hasInbox(paths) &&
+        !agent.busy
+      ) {
+        if (policy.allowConsolidation) {
+          await consolidateMemory(life.lastDiary, {
+            config,
+            paths,
+            memory: this.ctx.memory,
+            emit,
+            onChange,
+          });
+        } else {
+          addDeferred(paths, { kind: "consolidate", runAfter: policy.nextChangeAt, payload: { day: life.lastDiary } });
+        }
+      }
     }
 
-    if (flushed === 0 && policy.allowProactive && !agent.busy) {
+    // 先把昨晚/静默期记下的话补发掉，再考虑新的自己的时间；两条主动消息不要同一分钟抢着说。
+    const flushed = pending ? 0 : await this.flushPendingShares(now, rhythm);
+    this.maybeDecayRoom(now);
+
+    policy = costPolicy(config, todayUsage(paths, config), now);
+    if (!pending && flushed === 0 && policy.allowProactive && !agent.busy) {
       await this.maybeSpeak(now, rhythm);
     }
 
@@ -209,70 +223,251 @@ export class Scheduler {
     saveDeferred(paths, remaining);
   }
 
-  private async maybeOwnTime(
-    now: number,
-    rhythm: ReturnType<typeof getRhythm>,
-    policy: ReturnType<typeof costPolicy>,
-  ): Promise<void> {
+  private async maybeOwnTime(now: number, rhythm: ReturnType<typeof getRhythm>): Promise<void> {
     const { config, paths, agent } = this.ctx;
     if (agent.isHolding()) return;
-    if (!config.web.ownTimeEnabled) return;
+    if (!config.web.ownTimeEnabled) {
+      saveOwn(paths, ensureOwnSchedule(config, now, loadOwn(paths)));
+      return;
+    }
     if (rhythm.phase !== "awake" || isQuietHours(config, now)) return;
 
     let own = ensureOwnSchedule(config, now, loadOwn(paths));
-    if (!policy.allowOwnTime) {
-      saveOwn(paths, own);
-      return;
-    }
     if (!own.nextAt || own.nextAt > now || own.windowEnd <= now) {
       saveOwn(paths, own);
       return;
     }
 
+    // 权限按实际时间算（可能在这次 tick 里刚花过钱），补跑也一样。
+    const policy = costPolicy(config, todayUsage(paths, config), now);
+    if (!policy.allowOwnTime) {
+      saveOwn(paths, own);
+      return;
+    }
+
+    const plannedAt = own.nextAt;
     const windowEnd = own.windowEnd;
+    const missedKey = own.windowKey;
+
+    // 新窗口要试了，旧的补跑就被取代——只补最近一个。
+    if (own.pendingCatchUp && own.pendingCatchUp.key !== missedKey) {
+      own.pendingCatchUp = null;
+    }
+
+    // 先花 3 秒确认真的能连上，别让断网时的模型重试白烧一轮。
+    if (!(await probeOnline(config))) {
+      own.lastWindowKey = missedKey;
+      own.pendingCatchUp = createPendingCatchUp({ key: missedKey, plannedAt, windowEnd, now });
+      own.activeUntil = 0;
+      own.nextAt = 0;
+      own.windowEnd = 0;
+      own.windowKey = "";
+      saveOwn(paths, ensureOwnSchedule(config, now, own));
+      this.ctx.onChange();
+      return;
+    }
+
     markOwnStart(own, now, windowEnd);
     saveOwn(paths, own);
     this.ctx.onChange();
 
     const result = await agent.runOwnTime(now, windowEnd);
-
+    const actualNow = Date.now();
     own = loadOwn(paths);
-    markOwnEnd(own, Date.now(), result.ok ? result.summary : result.error || "在房间里坐了一会儿。");
-    own = ensureOwnSchedule(config, Date.now(), own);
-
-    // 网络/服务端的临时故障不该算作她今天已经出过门：退回这次配额，10 分钟后再试一次。
-    const infraFailure =
-      result.errorKind === "network" ||
-      result.errorKind === "timeout" ||
-      result.errorKind === "rate" ||
-      result.errorKind === "server";
-    if (!result.ok && infraFailure) {
-      scheduleOwnRetry(own, config, Date.now());
-    }
 
     if (result.ok) {
+      markOwnEnd(own, actualNow, result.summary);
       addMilestone(paths, config, "第一次自己出门");
+      own = ensureOwnSchedule(config, actualNow, own);
+
       const remainingShares = Math.max(0, config.speak.tellOwnerMaxPerDay - own.shareCount);
       for (const share of result.shares.slice(0, remainingShares)) {
-        if (canShareNow(own, config, Date.now())) {
-          await agent.say(share, true);
+        if (canShareNow(own, config, actualNow)) {
+          await agent.say(share, true, actualNow);
           own.shareCount += 1;
           appendTimeline(paths, config, { kind: "share", text: `忍不住告诉他：${share.slice(0, 80)}` });
-        } else if (isQuietHours(config, Date.now())) {
+        } else if (isQuietHours(config, actualNow)) {
           // 静默期才排队；配额用完的话 tell_owner 已经跟她说清楚了，不悄悄攒着。
-          queueShare(own, share, nextClockTs(Date.now(), config.speak.quietEnd, config.behavior.timezone));
+          queueShare(own, share, nextClockTs(actualNow, config.speak.quietEnd, config.behavior.timezone));
           appendTimeline(paths, config, { kind: "share", text: `想分享，先记着：${share.slice(0, 80)}` });
         }
       }
-    } else if (result.error && result.error !== "被打断了。") {
+      saveOwn(paths, own);
+      this.ctx.onChange();
+      return;
+    }
+
+    // 失败不等于“她今天出过门了”：先收回这次尝试的痕迹。
+    own.activeUntil = 0;
+    own.nextAt = 0;
+    own.windowEnd = 0;
+    own.windowKey = "";
+
+    if (result.errorKind === "aborted") {
+      // 她选择了和主人说话，这件事就过去了，不补。
+      own.runsToday = Math.max(0, own.runsToday - 1);
+      saveOwn(paths, ensureOwnSchedule(config, actualNow, own));
+      this.ctx.onChange();
+      return;
+    }
+
+    if (isInfraFailure(result.errorKind)) {
+      own.runsToday = Math.max(0, own.runsToday - 1);
+      own.lastWindowKey = missedKey;
+      own.pendingCatchUp = createPendingCatchUp({
+        key: missedKey,
+        plannedAt,
+        windowEnd,
+        now: actualNow,
+        attempts: 1,
+        nextRetryAt: actualNow + catchUpBackoff(1),
+        lastErrorKind: result.errorKind,
+        lastError: result.error || "网络没连上。",
+      });
+      // 不 markOwnEnd、不 unread、不写「没去成」：失败了也不该留下痕迹。
+      saveOwn(paths, ensureOwnSchedule(config, actualNow, own));
+      this.ctx.onChange();
+      return;
+    }
+
+    // auth / unknown / 早退：这次不算，也不补跑。
+    own.runsToday = Math.max(0, own.runsToday - 1);
+    if (result.errorKind === "auth" && result.error) {
+      this.ctx.emit({ type: "error", message: result.error });
+    } else if (result.error) {
+      console.warn(`[own] ${result.errorKind ?? "unknown"}: ${result.error}`);
+    }
+    saveOwn(paths, ensureOwnSchedule(config, actualNow, own));
+    this.ctx.onChange();
+  }
+
+  /**
+   * 离线错过的那一轮自己的时间：联网后静默补跑，聊天/日志/时间线都写原计划时刻。
+   * 只补最近一个窗口；跨逻辑日、超过 4 小时或失败的都按退避规则处理。
+   */
+  private async maybeCatchUp(now: number): Promise<void> {
+    const { config, paths, agent } = this.ctx;
+    let own = loadOwn(paths);
+    let pending = own.pendingCatchUp;
+
+    if (!config.web.ownTimeEnabled) {
+      if (pending) {
+        own.pendingCatchUp = null;
+        saveOwn(paths, own);
+      }
+      return;
+    }
+    if (!pending) return;
+    if (agent.busy || agent.isHolding()) return;
+
+    const rotate = config.behavior.rotateHour;
+    const tz = config.behavior.timezone;
+    const plannedDay = dayKey(pending.plannedAt, rotate, tz);
+    if (plannedDay !== dayKey(now, rotate, tz)) {
+      own.pendingCatchUp = null;
+      saveOwn(paths, own);
+      return;
+    }
+    if (now - pending.plannedAt > CATCHUP_HORIZON_MS) {
+      own.pendingCatchUp = null;
+      saveOwn(paths, own);
+      return;
+    }
+    if (now < pending.nextRetryAt) return;
+    if (!config.model.apiKey.trim()) {
+      own.pendingCatchUp = null;
+      saveOwn(paths, own);
+      return;
+    }
+
+    const policy = costPolicy(config, todayUsage(paths, config), now);
+    if (!policy.allowOwnTime) {
+      pending.nextRetryAt = policy.isPeak
+        ? Math.max(now + 30_000, policy.nextChangeAt || now + 5 * 60_000)
+        : now + 10 * 60_000;
+      own.pendingCatchUp = pending;
+      saveOwn(paths, own);
+      return;
+    }
+
+    if (!(await probeOnline(config))) {
+      pending.attempts += 1;
+      pending.lastErrorKind = "network";
+      pending.lastError = "网络没连上。";
+      pending.nextRetryAt = now + catchUpBackoff(pending.attempts);
+      own.pendingCatchUp = pending;
+      saveOwn(paths, own);
+      return;
+    }
+
+    const result = await agent.runOwnTime(pending.plannedAt, pending.windowEnd, { catchUp: true });
+    const actualNow = Date.now();
+
+    if (result.ok) {
+      // tellOwner 可能已经 save 过队列，不能拿调用前的旧对象覆盖。
+      const latest = loadOwn(paths);
+      if (latest.day === plannedDay) latest.runsToday += 1;
+      markCatchUpDone(latest, pending, result.summary, actualNow);
+      addMilestone(paths, config, "第一次自己出门");
+      saveOwn(paths, ensureOwnSchedule(config, actualNow, latest));
+      await this.deliverCatchUpShares(result.shares, pending.plannedAt);
+      this.ctx.onChange();
+      return;
+    }
+
+    own = loadOwn(paths);
+    pending = own.pendingCatchUp ?? pending;
+
+    if (result.errorKind === "auth" || result.errorKind === "aborted") {
+      own.pendingCatchUp = null;
+      saveOwn(paths, own);
+      if (result.errorKind === "auth" && result.error) {
+        this.ctx.emit({ type: "error", message: result.error });
+      }
+      return;
+    }
+
+    if (result.errorKind === "unknown") {
+      pending.attempts += 1;
+      if (pending.attempts > CATCHUP_MAX_UNKNOWN_ATTEMPTS) {
+        own.pendingCatchUp = null;
+        saveOwn(paths, own);
+        return;
+      }
+    } else if (isInfraFailure(result.errorKind)) {
+      pending.attempts += 1;
+    } else {
+      // 没有 errorKind 的早退（没 Key、自己时间被关掉等）：不补了。
+      own.pendingCatchUp = null;
+      saveOwn(paths, own);
+      return;
+    }
+
+    pending.lastErrorKind = result.errorKind ?? "unknown";
+    pending.lastError = result.error || "补跑失败了。";
+    pending.nextRetryAt = actualNow + catchUpBackoff(pending.attempts);
+    own.pendingCatchUp = pending;
+    saveOwn(paths, own);
+  }
+
+  /** 补跑成功后的分享：静默投递，只受每日 tell_owner 配额限制。 */
+  private async deliverCatchUpShares(shares: string[], plannedAt: number): Promise<void> {
+    const { config, paths, agent } = this.ctx;
+    if (!shares.length) return;
+    const own = loadOwn(paths);
+    resetShareDay(own, config, plannedAt);
+    for (const share of shares) {
+      if (own.shareCount + own.pendingShares.length >= config.speak.tellOwnerMaxPerDay) break;
+      await agent.say(share, true, plannedAt, { silent: true, catchUp: true });
+      own.shareCount += 1;
       appendTimeline(paths, config, {
-        kind: "own",
-        text: `自己的时间没去成：${result.error}`,
-        meta: { errorKind: result.errorKind, errorCode: result.errorCode },
+        kind: "share",
+        text: `忍不住告诉他：${share.slice(0, 80)}`,
+        ts: plannedAt,
+        meta: { catchUp: true, silent: true },
       });
     }
     saveOwn(paths, own);
-    this.ctx.onChange();
   }
 
   /**

@@ -1,4 +1,4 @@
-import type { AppConfig, OwnTimeState, PendingShare } from "./types.js";
+import type { AppConfig, OwnTimeState, PendingCatchUp, PendingShare } from "./types.js";
 import type { Paths } from "./config.js";
 import { readJson, writeJson } from "./store.js";
 import { addDays, dayKey, formatClock, zonedParts, zonedTimeToTs } from "./time.js";
@@ -17,6 +17,24 @@ const REST_WINDOWS: [number, number][] = [
   [15 * 60, 17 * 60],
   [20 * 60 + 40, 22 * 60],
 ];
+
+/** 补跑的年龄上限；超过就丢弃，避免房间/心情/记忆的“当前值”穿帮。 */
+export const CATCHUP_HORIZON_MS = 4 * 60 * 60_000;
+
+/** 断网重试退避；实际触发还要等 60 秒的 tick。 */
+export const CATCHUP_BACKOFF_MS = [30_000, 60_000, 120_000, 300_000];
+
+/** unknown 类失败最多再试 2 次，避免坏请求无限挂起。 */
+export const CATCHUP_MAX_UNKNOWN_ATTEMPTS = 2;
+
+export function catchUpBackoff(attempts: number): number {
+  const index = Math.max(0, Math.min(CATCHUP_BACKOFF_MS.length - 1, attempts));
+  return CATCHUP_BACKOFF_MS[index];
+}
+
+export function isInfraFailure(kind?: string): boolean {
+  return kind === "network" || kind === "timeout" || kind === "rate" || kind === "server";
+}
 
 function ownFile(p: Paths): string {
   return `${p.state}/own.json`;
@@ -38,6 +56,9 @@ export function defaultOwnTimeState(): OwnTimeState {
     shareCount: 0,
     pendingShares: [],
     retryDay: "",
+    pendingCatchUp: null,
+    lastCatchUpAt: 0,
+    catchUpCount: 0,
     updatedAt: 0,
   };
 }
@@ -55,6 +76,26 @@ function normalizeShare(item: unknown): PendingShare | null {
   return { text, ts };
 }
 
+function normalizePendingCatchUp(value: unknown): PendingCatchUp | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<PendingCatchUp>;
+  const key = typeof raw.key === "string" ? raw.key.trim() : "";
+  const plannedAt = Number(raw.plannedAt);
+  const windowEnd = Number(raw.windowEnd);
+  if (!key || !Number.isFinite(plannedAt) || plannedAt <= 0) return null;
+  if (!Number.isFinite(windowEnd) || windowEnd <= plannedAt) return null;
+  const attempts = Number.isFinite(Number(raw.attempts)) ? Math.max(0, Math.floor(Number(raw.attempts))) : 0;
+  const nextRetryAt = Number.isFinite(Number(raw.nextRetryAt)) ? Number(raw.nextRetryAt) : plannedAt;
+  const createdAt = Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : plannedAt;
+  const kind = raw.lastErrorKind;
+  const lastErrorKind =
+    kind === "network" || kind === "timeout" || kind === "auth" || kind === "rate" || kind === "server" || kind === "unknown" || kind === "aborted"
+      ? kind
+      : undefined;
+  const lastError = typeof raw.lastError === "string" ? raw.lastError.slice(0, 300) : undefined;
+  return { key, plannedAt, windowEnd, attempts, nextRetryAt, lastErrorKind, lastError, createdAt };
+}
+
 export function loadOwn(p: Paths): OwnTimeState {
   const raw = readJson<Partial<OwnTimeState>>(ownFile(p), {});
   const shares = Array.isArray(raw.pendingShares) ? raw.pendingShares.map(normalizeShare) : [];
@@ -63,6 +104,10 @@ export function loadOwn(p: Paths): OwnTimeState {
     ...raw,
     // 旧版本存的是字符串，读进来时统一成 {text, ts}（ts=0 视为来历不明，稍后丢弃）。
     pendingShares: shares.filter((item): item is PendingShare => Boolean(item)).slice(-6),
+    // 坏掉的 pending 会让调度一直卡在一个跑不了的窗口上，宁可直接丢掉。
+    pendingCatchUp: normalizePendingCatchUp(raw.pendingCatchUp),
+    lastCatchUpAt: Number.isFinite(Number(raw.lastCatchUpAt)) ? Number(raw.lastCatchUpAt) : 0,
+    catchUpCount: Number.isFinite(Number(raw.catchUpCount)) ? Number(raw.catchUpCount) : 0,
   };
 }
 
@@ -194,6 +239,7 @@ export function markOwnEnd(state: OwnTimeState, now: number, result: string): vo
 /**
  * 网络之类的基础设施故障不该算她今天已经出过门：退回这次配额，10 分钟后再试一次。
  * 每天只补一次，避免一整天反复重试烧额度。返回是否安排了补跑。
+ * @deprecated v1 的离线补跑改用 pendingCatchUp，调度器不再调用它。
  */
 export function scheduleOwnRetry(state: OwnTimeState, config: AppConfig, now: number): boolean {
   const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
@@ -260,6 +306,60 @@ export function recentOwnResult(state: OwnTimeState, now: number, maxAgeMs: numb
   return `刚才${state.lastResult.replace(/\s+/g, " ").trim().slice(0, 60)}`;
 }
 
+export function createPendingCatchUp(input: {
+  key: string;
+  plannedAt: number;
+  windowEnd: number;
+  now: number;
+  attempts?: number;
+  nextRetryAt?: number;
+  lastErrorKind?: PendingCatchUp["lastErrorKind"];
+  lastError?: string;
+}): PendingCatchUp {
+  const attempts = Math.max(0, Math.floor(input.attempts ?? 0));
+  return {
+    key: input.key,
+    plannedAt: input.plannedAt,
+    windowEnd: input.windowEnd,
+    attempts,
+    nextRetryAt: input.nextRetryAt ?? input.now + catchUpBackoff(attempts),
+    lastErrorKind: input.lastErrorKind ?? "network",
+    lastError: input.lastError,
+    createdAt: input.now,
+  };
+}
+
+export function clearPendingCatchUp(state: OwnTimeState): void {
+  state.pendingCatchUp = null;
+}
+
+/** 补跑成功：按计划时刻写结果，实际时刻只用于诊断。 */
+export function markCatchUpDone(
+  state: OwnTimeState,
+  pending: PendingCatchUp,
+  summary: string,
+  actualNow: number,
+): void {
+  state.activeUntil = 0;
+  state.lastRunAt = pending.plannedAt;
+  state.lastResult = summary.replace(/\s+/g, " ").trim().slice(0, 320);
+  state.lastWindowKey = pending.key;
+  state.unread = (state.unread ?? 0) + 1;
+  state.pendingCatchUp = null;
+  state.lastCatchUpAt = actualNow;
+  state.catchUpCount = (state.catchUpCount ?? 0) + 1;
+  state.nextAt = 0;
+  state.windowEnd = 0;
+  state.windowKey = "";
+  state.updatedAt = actualNow;
+}
+
+export function pendingCatchUpLabel(state: OwnTimeState, timezone: string): string {
+  const pending = state.pendingCatchUp;
+  if (!pending) return "";
+  return `${formatClock(pending.plannedAt, timezone)} 的窗口，已试 ${pending.attempts} 次`;
+}
+
 export function ownStateSnapshot(state: OwnTimeState, config: AppConfig, now: number) {
   return {
     enabled: config.web.ownTimeEnabled,
@@ -269,6 +369,15 @@ export function ownStateSnapshot(state: OwnTimeState, config: AppConfig, now: nu
     label: ownLabel(state, now, config.behavior.timezone),
     lastResult: state.lastResult,
     unread: state.unread ?? 0,
+    pending: state.pendingCatchUp
+      ? {
+          plannedAt: state.pendingCatchUp.plannedAt,
+          windowEnd: state.pendingCatchUp.windowEnd,
+          attempts: state.pendingCatchUp.attempts,
+          nextRetryAt: state.pendingCatchUp.nextRetryAt,
+          lastErrorKind: state.pendingCatchUp.lastErrorKind,
+        }
+      : null,
   };
 }
 

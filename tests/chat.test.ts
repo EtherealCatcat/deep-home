@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { DEFAULT_CONFIG, ensureLayout, paths } from "../src/config.js";
 import { appendChatMessage, quoteLine, readDayMessages, removeUserMessagesSince, toLLMHistory } from "../src/chat.js";
 import type { ChatMessage } from "../src/types.js";
@@ -112,5 +112,35 @@ describe("cancelling a burst", () => {
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("silent catch-up messages", () => {
+  const roots: string[] = [];
+
+  afterEach(() => {
+    for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps the planned timestamp and the silent meta", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "deephome-chat-"));
+    roots.push(root);
+    const p = paths(root);
+    ensureLayout(p);
+    const planned = new Date("2026-11-18T12:20:00+08:00").getTime();
+
+    appendChatMessage(p, config, {
+      role: "assistant",
+      kind: "proactive",
+      text: "昨晚看到一只猫",
+      ts: planned,
+      meta: { proactive: true, silent: true, catchUp: true },
+    });
+
+    const [saved] = readDayMessages(p, "2026-11-18");
+    expect(saved.ts).toBe(planned);
+    expect(saved.dayKey).toBe("2026-11-18");
+    expect(saved.meta?.silent).toBe(true);
+    expect(saved.meta?.catchUp).toBe(true);
   });
 });

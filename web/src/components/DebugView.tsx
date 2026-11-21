@@ -19,6 +19,16 @@ import { Badge, Card, Loading, SectionTitle } from "./ui";
 
 type DebugTab = "system" | "now" | "raw" | "tools" | "history";
 
+interface PendingCatchUpView {
+  plannedAt?: number;
+  windowEnd?: number;
+  attempts?: number;
+  nextRetryAt?: number;
+  lastErrorKind?: string;
+  lastError?: string;
+  createdAt?: number;
+}
+
 const debugTabs: { key: DebugTab; label: string }[] = [
   { key: "system", label: "系统提示词" },
   { key: "now", label: "此刻" },
@@ -100,6 +110,8 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
   }
 
   const turn = data.lastTurn;
+  const catchUp =
+    (data.own as { pendingCatchUp?: PendingCatchUpView | null } | undefined)?.pendingCatchUp ?? null;
   const turnText =
     tab === "system"
       ? turn?.system ?? ""
@@ -270,6 +282,31 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
               </>
             ) : (
               <p className="text-[10px] text-ink-faint">最近没有失败记录。</p>
+            )}
+          </Card>
+          <Card className="p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-ink-faint">待补跑</div>
+              {catchUp ? (
+                <span className="rounded-full bg-sea/10 px-1.5 py-0.5 font-mono text-[9px] text-sea-deep">
+                  {catchUp.attempts ?? 0} 次
+                </span>
+              ) : null}
+            </div>
+            {catchUp ? (
+              <>
+                <div className="text-[11.5px] leading-5 text-ink">
+                  {catchUp.plannedAt ? new Date(catchUp.plannedAt).toLocaleString("zh-CN") : "时间未知"}
+                </div>
+                <div className="mt-1.5 font-mono text-[9.5px] text-ink-faint">
+                  下次重试 {catchUp.nextRetryAt ? new Date(catchUp.nextRetryAt).toLocaleTimeString("zh-CN") : "-"}
+                </div>
+                <div className="mt-0.5 font-mono text-[9.5px] text-ink-faint">
+                  {catchUp.lastErrorKind || "unknown"} · {catchUp.lastError || "没有记录"}
+                </div>
+              </>
+            ) : (
+              <p className="text-[10px] text-ink-faint">没有待补跑的窗口。</p>
             )}
           </Card>
           <Card className="p-4">

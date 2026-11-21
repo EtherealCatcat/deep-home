@@ -623,6 +623,20 @@ app.put("/api/settings", async (request, reply) => {
   if (!Array.isArray(next.web.rssFeeds)) next.web.rssFeeds = [];
   next.web.rssFeeds = next.web.rssFeeds.filter((item): item is string => typeof item === "string" && item.startsWith("http"));
 
+  // 关掉自己的时间、换时区或换逻辑日起点后，旧的补跑窗口已经没有意义了。
+  // 预算/Key/模型变更不清：用户可能正是为了让补跑能跑才改的。
+  const catchUpInvalid =
+    (config.web.ownTimeEnabled && !next.web.ownTimeEnabled) ||
+    config.behavior.timezone !== next.behavior.timezone ||
+    config.behavior.rotateHour !== next.behavior.rotateHour;
+  if (catchUpInvalid) {
+    const own = loadOwn(p);
+    if (own.pendingCatchUp) {
+      own.pendingCatchUp = null;
+      saveOwn(p, own);
+    }
+  }
+
   saveConfig(p, next);
   config = next;
   memory.setConfig(config);

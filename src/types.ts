@@ -145,6 +145,32 @@ export interface PendingShare {
   ts: number;
 }
 
+export type CatchUpErrorKind =
+  | "network"
+  | "timeout"
+  | "auth"
+  | "rate"
+  | "server"
+  | "unknown"
+  | "aborted";
+
+/** 断网错过的一次自己的时间；只保留最近一个窗口。 */
+export interface PendingCatchUp {
+  /** 原窗口 key，形如 "2026-11-21:790"。 */
+  key: string;
+  /** 原计划开始时刻；叙事、落盘、聊天时间都用它。 */
+  plannedAt: number;
+  /** 原计划结束时刻。 */
+  windowEnd: number;
+  /** 已尝试次数（不含最初那次正常窗口的尝试）。 */
+  attempts: number;
+  /** 下一次允许尝试的实际时间。 */
+  nextRetryAt: number;
+  lastErrorKind?: CatchUpErrorKind;
+  lastError?: string;
+  createdAt: number;
+}
+
 export interface OwnTimeState {
   nextAt: number;
   windowEnd: number;
@@ -159,8 +185,14 @@ export interface OwnTimeState {
   shareDay: string;
   shareCount: number;
   pendingShares: PendingShare[];
-  /** 当天失败后用掉的那次补跑（避免一整天反复重试烧额度）。 */
+  /** 当天失败后用掉的那次补跑（旧字段，v1 仅保留兼容）。 */
   retryDay?: string;
+  /** 唯一一个待补跑的窗口；null / 缺省表示没有。 */
+  pendingCatchUp?: PendingCatchUp | null;
+  /** 最近一次补跑成功的实际时间，Debug 用。 */
+  lastCatchUpAt?: number;
+  /** 累计补跑成功次数，Debug 用。 */
+  catchUpCount?: number;
   updatedAt: number;
 }
 

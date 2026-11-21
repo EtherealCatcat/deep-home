@@ -164,7 +164,7 @@ export default function App() {
           break;
         case "message":
           addMessage(data.message);
-          if (data.message.role === "assistant" && !burstRef.current) {
+          if (data.message.role === "assistant" && !burstRef.current && !data.message.meta?.silent) {
             const now = Date.now();
             if (now - lastNotifyAt.current > 30_000) {
               lastNotifyAt.current = now;
