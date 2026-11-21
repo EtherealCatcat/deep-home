@@ -71,7 +71,7 @@ npm run tauri:build:p5    # .app + .dmg
 
 ```
 src-tauri/target/release/bundle/macos/DeepHome.app
-src-tauri/target/release/bundle/dmg/DeepHome_0.3.3_aarch64.dmg
+src-tauri/target/release/bundle/dmg/DeepHome_0.4.0_aarch64.dmg
 ```
 
 应用启动时会：
@@ -172,6 +172,7 @@ DeepSeek 的高峰时段默认是**北京时间工作日 09:00–12:00、14:00�
 - 独立会话，不占聊天上下文；先翻笔记/记忆，再读 RSS 或网页。
 - 你发消息会打断她，她先回你；回完再继续。
 - 看到想分享的会用 `tell_owner`，每天最多 2 次；静默时段先记着，早上再发。
+- 结束时会按她刚做的事更新房间和状态栏的「手头」（看书、收拾、发呆）；超过 6 小时没动静就回到「在书桌前发呆」。
 - 高峰时段不会安排 own；旧的落在高峰的计划会自动重排。
 - 到点却连不上模型服务时，她不会假装已经出过门：这一轮先记着，联网后静默补跑，记录写在原计划时刻，也不弹通知；补跑同样受预算、峰谷和每天次数限制，超过 4 小时或跨天就不补了。
 - Today 页有「她自己的时间」卡片，Debug 页能看到 `own.json`、待补跑的窗口和记录。
