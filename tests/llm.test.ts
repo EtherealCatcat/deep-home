@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_CONFIG } from "../src/config.js";
 import { callLLM, getLastLLMFailure, LLMError } from "../src/llm.js";
+import { resetProviderHealth } from "../src/provider.js";
 
 const config = structuredClone(DEFAULT_CONFIG);
 config.model.apiKey = "sk-test";
@@ -29,6 +30,7 @@ async function settle<T>(promise: Promise<T>): Promise<T | unknown> {
 
 beforeEach(() => {
   vi.useFakeTimers();
+  resetProviderHealth();
 });
 
 afterEach(() => {
@@ -98,5 +100,63 @@ describe("callLLM 失败分类与重试", () => {
     expect(error.attempts).toBe(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(error.message).toBe("模型响应超时。");
+  });
+});
+
+describe("callLLM 供应商健康", () => {
+  it("429 不重试，并记录 Retry-After", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response(JSON.stringify({ error: { message: "rate limited" } }), {
+        status: 429,
+        headers: { "retry-after": "120" },
+      }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = (await settle(callLLM(config, [{ role: "user", content: "在吗" }]))) as LLMError;
+    expect(error.kind).toBe("rate");
+    expect(error.retryAfterMs).toBe(120_000);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("400 分类为配置问题且不重试", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: "model not found" } }), { status: 400 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = (await settle(callLLM(config, [{ role: "user", content: "在吗" }]))) as LLMError;
+    expect(error.kind).toBe("config");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("attempts 选项限制重试次数", async () => {
+    const fetchMock = vi.fn().mockRejectedValue(networkFailure());
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = (await settle(
+      callLLM(config, [{ role: "user", content: "在吗" }], { attempts: 2 }),
+    )) as LLMError;
+    expect(error.attempts).toBe(2);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("熔断时直接拒绝且不请求网络，force 可以绕过", async () => {
+    const { noteProviderFailure } = await import("../src/provider.js");
+    for (let index = 0; index < 3; index += 1) {
+      noteProviderFailure({ kind: "server", message: "down", at: Date.now(), attempts: 1 });
+    }
+    const fetchMock = vi.fn().mockResolvedValue(completion("在呢。"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const error = (await settle(callLLM(config, [{ role: "user", content: "在吗" }]))) as LLMError;
+    expect(error.code).toBe("CIRCUIT_OPEN");
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    const forced = (await settle(
+      callLLM(config, [{ role: "user", content: "在吗" }], { force: true, attempts: 1 }),
+    )) as { content: string };
+    expect(forced.content).toBe("在呢。");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -4,7 +4,7 @@ import type { AppConfig } from "./types.js";
 import type { Paths } from "./config.js";
 import type { MemoryStore } from "./memory.js";
 import type { ServerEvent } from "./events.js";
-import { callLLM, parseJSON } from "./llm.js";
+import { BACKGROUND_ATTEMPTS, BACKGROUND_TIMEOUT_MS, callLLM, parseJSON } from "./llm.js";
 import { isPeak } from "./pricing.js";
 import { recordUsage } from "./usage.js";
 import { loadLife, saveLife } from "./life.js";
@@ -69,7 +69,14 @@ export async function consolidateMemory(day: string, ctx: ConsolidateContext): P
         { role: "system", content: system },
         { role: "user", content: user },
       ],
-      { maxTokens: 3600, model: config.model.sideModel, temperature: 0.2, json: true },
+      {
+        maxTokens: 3600,
+        model: config.model.sideModel,
+        temperature: 0.2,
+        json: true,
+        attempts: BACKGROUND_ATTEMPTS,
+        timeoutMs: BACKGROUND_TIMEOUT_MS,
+      },
     );
     recordUsage(paths, config, {
       model: result.model,

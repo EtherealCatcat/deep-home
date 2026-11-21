@@ -16,6 +16,7 @@ export interface LoopOptions {
   toolContext: ToolContext;
   kind: string;
   signal?: AbortSignal;
+  llmOptions?: { attempts?: number; timeoutMs?: number };
 }
 
 export interface LoopResult {
@@ -24,7 +25,7 @@ export interface LoopResult {
 }
 
 export async function runToolLoop(options: LoopOptions): Promise<LoopResult> {
-  const { config, paths, messages, scene, maxSteps, maxTokens, toolContext, kind, signal } = options;
+  const { config, paths, messages, scene, maxSteps, maxTokens, toolContext, kind, signal, llmOptions } = options;
   const tools = toolSchemas(scene);
   const called: { name: string; args: unknown }[] = [];
   let content = "";
@@ -35,6 +36,8 @@ export async function runToolLoop(options: LoopOptions): Promise<LoopResult> {
       tools,
       toolChoice: "auto",
       signal,
+      attempts: llmOptions?.attempts,
+      timeoutMs: llmOptions?.timeoutMs,
     });
     content = result.content;
     const peak = isPeak(config, Date.now());

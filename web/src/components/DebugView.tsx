@@ -262,6 +262,39 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
         <div className="space-y-4">
           <Card className="p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="text-[10px] uppercase tracking-[0.16em] text-ink-faint">模型服务</div>
+              <span
+                className={`rounded-full px-1.5 py-0.5 font-mono text-[9px] ${
+                  data.provider.state === "ok" ? "bg-sea/10 text-sea-deep" : "bg-coral/10 text-coral"
+                }`}
+              >
+                {data.provider.state}
+              </span>
+            </div>
+            <div className="text-[11.5px] leading-5 text-ink">{data.provider.label}</div>
+            <div className="mt-0.5 text-[10px] text-ink-faint">{data.provider.detail}</div>
+            <div className="mt-1.5 font-mono text-[9.5px] text-ink-faint">
+              连续失败 {data.provider.consecutiveFailures} 次
+              {data.provider.openUntil
+                ? ` · 熔断到 ${new Date(data.provider.openUntil).toLocaleTimeString("zh-CN")}`
+                : ""}
+              {data.provider.retryAt ? ` · 限流到 ${new Date(data.provider.retryAt).toLocaleTimeString("zh-CN")}` : ""}
+            </div>
+            <div className="mt-0.5 font-mono text-[9.5px] text-ink-faint">
+              探活 {data.provider.lastProbeAt ? new Date(data.provider.lastProbeAt).toLocaleTimeString("zh-CN") : "-"} ·{" "}
+              {data.provider.lastProbeAt ? (data.provider.lastProbeOk ? "可达" : "失败") : "未探测"}
+            </div>
+            {data.provider.lastFailure ? (
+              <div className="mt-1.5 rounded-lg bg-ink/[0.03] px-2 py-1.5 font-mono text-[9.5px] leading-4 text-ink-faint">
+                <span className="text-ink-soft">{data.provider.lastFailure.kind}</span> ·{" "}
+                {data.provider.lastFailure.message}
+                {data.provider.lastFailure.code ? ` · ${data.provider.lastFailure.code}` : ""}
+                {data.provider.lastFailure.status ? ` · HTTP ${data.provider.lastFailure.status}` : ""}
+              </div>
+            ) : null}
+          </Card>
+          <Card className="p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
               <div className="text-[10px] uppercase tracking-[0.16em] text-ink-faint">最近一次模型失败</div>
               {data.lastLlmError ? (
                 <span className="rounded-full bg-coral/10 px-1.5 py-0.5 font-mono text-[9px] text-coral">

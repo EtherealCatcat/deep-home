@@ -179,3 +179,53 @@ export function ensureSession(p: Paths, config: AppConfig): SessionMeta {
   if (!exists(file)) writeJson(file, meta);
   return meta;
 }
+
+export type RetryPlan =
+  | {
+      ok: true;
+      text: string;
+      firstTs: number;
+      quote?: QuoteRef;
+      image?: { file: string; mime: string };
+      count: number;
+    }
+  | { ok: false; status: number; error: string };
+
+/**
+ * 手动重试：取最后一条助手消息之后的用户消息，合成一轮。
+ * 只读规划，不落盘——调用方只 enqueue，不 appendChatMessage。
+ */
+export function planRetry(history: ChatMessage[], historyStart: number): RetryPlan {
+  let lastAssistant = -1;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    if (history[index].role === "assistant") {
+      lastAssistant = index;
+      break;
+    }
+  }
+  const tail = history.slice(lastAssistant + 1).filter((message) => message.role === "user");
+  if (!tail.length) return { ok: false, status: 400, error: "没有要重试的消息。" };
+  if (tail.some((message) => message.kind === "sticker")) {
+    return { ok: false, status: 400, error: "表情不好重试，再发一次吧。" };
+  }
+  if (tail.filter((message) => message.kind === "image").length > 1) {
+    return { ok: false, status: 400, error: "一次只能重发一张图片。" };
+  }
+  const first = tail[0];
+  if (first.ts < historyStart) {
+    return { ok: false, status: 400, error: "这段已经翻篇了，重新说吧。" };
+  }
+  const meta = first.meta ?? {};
+  const image =
+    typeof meta.file === "string" && typeof meta.mime === "string"
+      ? { file: meta.file, mime: meta.mime }
+      : undefined;
+  return {
+    ok: true,
+    text: tail.map((message) => message.text).join("\n"),
+    firstTs: first.ts,
+    quote: first.quote,
+    image,
+    count: tail.length,
+  };
+}

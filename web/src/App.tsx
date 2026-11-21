@@ -37,6 +37,7 @@ export default function App() {
   const pageRef = useRef<Page>(page);
   const burstRef = useRef(false);
   const lastNotifyAt = useRef(0);
+  const lastErrorToast = useRef("");
 
   pageRef.current = page;
   burstRef.current = status?.burst ?? false;
@@ -168,6 +169,7 @@ export default function App() {
           setStatus(data.status);
           break;
         case "message":
+          lastErrorToast.current = "";
           addMessage(data.message);
           if (data.message.role === "assistant" && !burstRef.current && !data.message.meta?.silent) {
             const now = Date.now();
@@ -194,7 +196,11 @@ export default function App() {
           if (!data.busy) setTyping(false);
           break;
         case "error":
-          showToast(data.message, "error");
+          // 同一条故障只提醒一次；持续状态交给聊天页顶部的状态条。
+          if (data.message && data.message !== lastErrorToast.current) {
+            lastErrorToast.current = data.message;
+            showToast(data.message, "error");
+          }
           break;
         case "diary":
           showToast("她写完了今天的日记。");
@@ -286,6 +292,16 @@ export default function App() {
     }
   }
 
+  async function retryChat() {
+    try {
+      await api.retry();
+      setStatus((prev) => (prev ? { ...prev, lastChatError: undefined } : prev));
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : "重试失败。", "error");
+      throw error;
+    }
+  }
+
   async function cancelBurst() {
     try {
       const result = await api.cancelBurst();
@@ -319,6 +335,7 @@ export default function App() {
             onBurst={toggleBurst}
             onCancelBurst={cancelBurst}
             onNavigateSettings={() => navigate("settings")}
+            onRetry={retryChat}
           />
         ) : page === "today" ? (
           <TodayView status={status} showToast={showToast} />

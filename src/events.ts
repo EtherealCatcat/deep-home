@@ -1,6 +1,7 @@
 import type { ChatMessage, MoodState, Relationship, RoomState, TimelineEvent, UsageDay } from "./types.js";
 import type { CostPolicy } from "./pricing.js";
 import type { Phase } from "./rhythm.js";
+import type { ChatError, ProviderSnapshot } from "./provider.js";
 
 export interface StatusSnapshot {
   name: string;
@@ -33,6 +34,8 @@ export interface StatusSnapshot {
   lastOwnerAt: number;
   lastMessageAt: number;
   activity: string;
+  provider: ProviderSnapshot;
+  lastChatError?: ChatError;
   own: {
     enabled: boolean;
     active: boolean;
@@ -52,7 +55,7 @@ export type ServerEvent =
   | { type: "mood"; mood: MoodState }
   | { type: "timeline"; event: TimelineEvent }
   | { type: "busy"; busy: boolean }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; kind?: string; retryable?: boolean; at?: number }
   | { type: "done"; turnId: string }
   | { type: "diary"; day: string }
   | { type: "burst_cancel"; from: number };

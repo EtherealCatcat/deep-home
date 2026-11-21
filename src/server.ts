@@ -18,7 +18,7 @@ import {
   relationshipGrowth,
   updateStreak,
 } from "./relationship.js";
-import { appendChatMessage, recentMessages, removeUserMessagesSince } from "./chat.js";
+import { appendChatMessage, planRetry, recentMessages, removeUserMessagesSince } from "./chat.js";
 import { addReminder, cancelReminder, loadReminders, markReminderDone, parseDue } from "./care.js";
 import { listDiaries, readDiary, yesterdayKey } from "./diaryStore.js";
 import { writeDiary, diaryTarget } from "./diary.js";
@@ -27,7 +27,8 @@ import { appendTimeline, readTimeline, readTimelineForDisplay } from "./timeline
 import { loadDeferred, loadLife } from "./life.js";
 import { todayUsage } from "./usage.js";
 import { MODEL_PRICES, costPolicy, normalizePeakWindows, peakInfo } from "./pricing.js";
-import { callLLM, getLastLLMFailure } from "./llm.js";
+import { SIDE_ATTEMPTS, SIDE_TIMEOUT_MS, callLLM, getLastLLMFailure, LLMError } from "./llm.js";
+import { providerSnapshot, resetProviderHealth } from "./provider.js";
 import { findSticker, listStickers } from "./stickers.js";
 import { avatarFile, avatarInfo, clearAvatar, saveAvatar } from "./avatar.js";
 import { loadOwn, markOwnSeen, ownStateSnapshot, saveOwn } from "./own.js";
@@ -114,6 +115,7 @@ function currentStatus() {
     burst: agent.isHolding(),
     burstCount: agent.pendingCount,
     unread,
+    lastChatError: agent.getLastChatError(),
   });
 }
 
@@ -269,6 +271,14 @@ app.post("/api/messages", async (request, reply) => {
   agent.enqueue(text || "（发来一张图片，看看是什么。）", undefined, quote, imageInfo);
   onChange();
   return { ok: true, message };
+});
+
+app.post("/api/retry", async (_request, reply) => {
+  if (agent.busy) return reply.code(409).send({ error: "她还在回上一条，等一下。" });
+  const plan = planRetry(recentMessages(p, config, 80), agent.historyStart);
+  if (!plan.ok) return reply.code(plan.status).send({ error: plan.error });
+  agent.enqueue(plan.text || "（发来一张图片，看看是什么。）", plan.firstTs, plan.quote, plan.image);
+  return { ok: true, count: plan.count };
 });
 
 app.post("/api/read", async () => {
@@ -545,6 +555,7 @@ app.get("/api/debug", async () => ({
   timeline: readTimeline(p, dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone)).slice(-20),
   lastTurn: agent.getDebug(),
   lastLlmError: getLastLLMFailure(),
+  provider: providerSnapshot(),
   config: maskConfig(config),
 }));
 
@@ -568,10 +579,22 @@ app.post("/api/test-model", async (request) => {
       maxTokens: 20,
       temperature: 0,
       model: cfg.model.model,
+      force: true,
+      recordHealth: false,
+      attempts: SIDE_ATTEMPTS,
+      timeoutMs: SIDE_TIMEOUT_MS,
     });
-    return { ok: true, text: result.content, model: result.model };
+    resetProviderHealth();
+    return { ok: true, text: result.content, model: result.model, provider: providerSnapshot() };
   } catch (error) {
-    return { ok: false, error: error instanceof Error ? error.message : "连接失败。" };
+    const failure = error instanceof LLMError ? error : null;
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "连接失败。",
+      kind: failure?.kind,
+      code: failure?.code,
+      provider: providerSnapshot(),
+    };
   }
 });
 
@@ -640,6 +663,8 @@ app.put("/api/settings", async (request, reply) => {
   saveConfig(p, next);
   config = next;
   memory.setConfig(config);
+  resetProviderHealth();
+  agent.clearLastChatError();
   refreshContext();
   onChange();
   return { ok: true, config: maskConfig(config), note: next.ui.port !== oldPort ? "端口改动需要重启服务。" : undefined };

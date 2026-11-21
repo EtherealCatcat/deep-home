@@ -100,6 +100,37 @@ export interface RoomState {
 
 export type Phase = "asleep" | "waking" | "awake" | "sleepy";
 
+export type ProviderState = "ok" | "down" | "auth" | "rate" | "config";
+
+export interface ProviderFailure {
+  kind: "network" | "timeout" | "auth" | "rate" | "server" | "config" | "unknown" | "probe";
+  message: string;
+  code?: string;
+  status?: number;
+  at: number;
+  attempts: number;
+  model?: string;
+}
+
+export interface ProviderSnapshot {
+  state: ProviderState;
+  label: string;
+  detail: string;
+  consecutiveFailures: number;
+  lastFailure?: ProviderFailure;
+  openUntil: number;
+  retryAt: number;
+  lastProbeAt: number;
+  lastProbeOk: boolean;
+}
+
+export interface ChatError {
+  message: string;
+  kind: "network" | "timeout" | "auth" | "rate" | "server" | "config" | "unknown";
+  at: number;
+  retryable: boolean;
+}
+
 export interface Status {
   name: string;
   ownerTitle: string;
@@ -131,6 +162,8 @@ export interface Status {
   lastOwnerAt: number;
   lastMessageAt: number;
   activity: string;
+  provider: ProviderSnapshot;
+  lastChatError?: ChatError;
   own: {
     enabled: boolean;
     active: boolean;
@@ -169,7 +202,7 @@ export type ServerEvent =
   | { type: "mood"; mood: MoodState }
   | { type: "timeline"; event: TimelineEvent }
   | { type: "busy"; busy: boolean }
-  | { type: "error"; message: string }
+  | { type: "error"; message: string; kind?: string; retryable?: boolean; at?: number }
   | { type: "done"; turnId: string }
   | { type: "diary"; day: string }
   | { type: "burst_cancel"; from: number };
@@ -299,7 +332,7 @@ export interface DebugPayload {
     silent: boolean;
   } | null;
   lastLlmError: {
-    kind: "network" | "timeout" | "auth" | "rate" | "server" | "unknown";
+    kind: "network" | "timeout" | "auth" | "rate" | "server" | "config" | "unknown";
     message: string;
     code: string;
     status: number;
@@ -307,5 +340,6 @@ export interface DebugPayload {
     at: number;
     model: string;
   } | null;
+  provider: ProviderSnapshot;
   config: AppConfig;
 }

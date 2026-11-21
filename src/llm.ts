@@ -1,6 +1,7 @@
 import type { AppConfig, LLMMessage, LLMResult, LLMUsage, ToolCall } from "./types.js";
+import { acquireProviderCall, noteProviderFailure, releaseProviderCall, type ProviderTicket } from "./provider.js";
 
-export type LLMFailureKind = "network" | "timeout" | "auth" | "rate" | "server" | "unknown";
+export type LLMFailureKind = "network" | "timeout" | "auth" | "rate" | "server" | "config" | "unknown";
 
 export interface LLMErrorOptions {
   status?: number;
@@ -8,6 +9,7 @@ export interface LLMErrorOptions {
   code?: string;
   kind?: LLMFailureKind;
   attempts?: number;
+  retryAfterMs?: number;
   cause?: unknown;
 }
 
@@ -17,6 +19,7 @@ export class LLMError extends Error {
   code: string;
   kind: LLMFailureKind;
   attempts: number;
+  retryAfterMs?: number;
 
   constructor(message: string, options: LLMErrorOptions = {}) {
     super(message, options.cause === undefined ? undefined : { cause: options.cause });
@@ -26,6 +29,7 @@ export class LLMError extends Error {
     this.code = options.code ?? "";
     this.kind = options.kind ?? "unknown";
     this.attempts = options.attempts ?? 1;
+    this.retryAfterMs = options.retryAfterMs;
   }
 }
 
@@ -38,7 +42,24 @@ export interface LLMOptions {
   json?: boolean;
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** 单次调用最多尝试几次（含第一次）。 */
+  attempts?: number;
+  /** 绕开熔断（连接测试用）。 */
+  force?: boolean;
+  /** false 时不更新供应商健康状态（连接测试用）。 */
+  recordHealth?: boolean;
 }
+
+/** 聊天回合：失败得快一点，把重试交给用户。 */
+export const CHAT_ATTEMPTS = 2;
+export const CHAT_TIMEOUT_MS = 60_000;
+/** 自己的时间 / 日记 / 整理：可以多等一会儿。 */
+export const BACKGROUND_ATTEMPTS = 5;
+export const BACKGROUND_TIMEOUT_MS = 120_000;
+/** 心情、整理这类附带调用：一次就够，别拖住主流程。 */
+export const SIDE_ATTEMPTS = 1;
+export const SIDE_TIMEOUT_MS = 15_000;
+export const PROBE_TIMEOUT_MS = 3000;
 
 /** 最近一次失败的模型请求，调试页用它显示原因、时间和重试次数。 */
 export interface LLMFailureRecord {
@@ -57,14 +78,23 @@ export function getLastLLMFailure(): LLMFailureRecord | null {
   return lastFailure;
 }
 
+export interface ProviderProbeResult {
+  reachable: boolean;
+  status?: number;
+  kind: "ok" | "http" | "unreachable" | "captive";
+}
+
 /**
- * 断网预检：拿到任意 HTTP 响应就算网络可达（401/404/5xx 都行）。
- * 200 但不是 JSON 通常是接住了 captive portal，当作离线，交给下一轮重试。
+ * 探测供应商端点：拿到任意 HTTP 响应就算网络可达（401/404/5xx 都行）。
+ * 200 但不是 JSON 通常是接住了 captive portal，当作不可用。
  * 这个请求不计费、不打印 Key。
  */
-export async function probeOnline(config: AppConfig, timeoutMs = 3000): Promise<boolean> {
+export async function probeProviderReachable(
+  config: AppConfig,
+  timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<ProviderProbeResult> {
   const base = config.model.baseUrl.trim().replace(/\/+$/, "");
-  if (!base) return false;
+  if (!base) return { reachable: false, kind: "unreachable" };
   try {
     const response = await fetch(`${base}/models`, {
       method: "GET",
@@ -73,12 +103,18 @@ export async function probeOnline(config: AppConfig, timeoutMs = 3000): Promise<
     });
     if (response.status === 200) {
       const contentType = response.headers.get("content-type") ?? "";
-      if (!contentType.includes("json")) return false;
+      if (!contentType.includes("json")) return { reachable: false, status: 200, kind: "captive" };
+      return { reachable: true, status: 200, kind: "ok" };
     }
-    return true;
+    return { reachable: true, status: response.status, kind: "http" };
   } catch {
-    return false;
+    return { reachable: false, kind: "unreachable" };
   }
+}
+
+/** @deprecated 用 probeProviderReachable，这里保留给旧调用。 */
+export async function probeOnline(config: AppConfig, timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
+  return (await probeProviderReachable(config, timeoutMs)).reachable;
 }
 
 function endpoint(baseUrl: string): string {
@@ -92,6 +128,9 @@ function friendlyError(status: number, body: string): string {
   if (status === 402) return "账户余额不足，DeepSeek 拒绝了请求。";
   if (status === 429) return "请求太频繁或额度受限，稍后再试。";
   if (status >= 500) return "模型服务暂时不可用，稍后再试。";
+  if (status === 400 || status === 404 || status === 405 || status === 422) {
+    return "模型配置有问题，检查 Base URL / 模型名。";
+  }
   try {
     const parsed = JSON.parse(body) as { error?: { message?: string } };
     if (parsed.error?.message) return parsed.error.message;
@@ -104,12 +143,23 @@ function friendlyError(status: number, body: string): string {
 function kindForStatus(status: number): LLMFailureKind {
   if (status === 401 || status === 403 || status === 402) return "auth";
   if (status === 429) return "rate";
+  if (status === 400 || status === 404 || status === 405 || status === 422) return "config";
   if (status >= 500) return "server";
   return "unknown";
 }
 
 function isRetryable(error: LLMError): boolean {
-  return error.kind === "network" || error.kind === "rate" || error.kind === "server";
+  return error.kind === "network" || error.kind === "server";
+}
+
+/** 429 的 Retry-After 可能是秒数，也可能是 HTTP 日期；封顶 10 分钟。 */
+function retryAfterMs(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(1000, Math.min(seconds * 1000, 600_000));
+  const date = Date.parse(value);
+  if (!Number.isNaN(date)) return Math.max(1000, Math.min(date - Date.now(), 600_000));
+  return undefined;
 }
 
 const NETWORK_DETAIL: Record<string, string> = {
@@ -169,10 +219,23 @@ export async function callLLM(
   messages: LLMMessage[],
   options: LLMOptions = {},
 ): Promise<LLMResult> {
+  const ticket: ProviderTicket | null =
+    options.force || options.recordHealth === false ? null : acquireProviderCall();
+  if (ticket && !ticket.ok) {
+    throw new LLMError("模型服务暂时不可用，稍后再试。", {
+      status: 503,
+      kind: "server",
+      code: "CIRCUIT_OPEN",
+      attempts: 0,
+    });
+  }
   try {
-    return await requestLLM(config, messages, options);
+    const result = await requestLLM(config, messages, options);
+    releaseProviderCall(ticket, null);
+    return result;
   } catch (error) {
     const failure = error instanceof LLMError ? error : new LLMError("模型请求失败。", { cause: error });
+    releaseProviderCall(ticket, failure);
     lastFailure = {
       kind: failure.kind,
       message: failure.message,
@@ -227,8 +290,9 @@ async function requestLLM(
     body.response_format = { type: "json_object" };
   }
 
+  const attempts = Math.max(1, options.attempts ?? MAX_ATTEMPTS);
   let lastError: LLMError | null = null;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 1; attempt <= attempts; attempt++) {
     const timeout = AbortSignal.timeout(options.timeoutMs ?? 120_000);
     const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
     try {
@@ -248,6 +312,8 @@ async function requestLLM(
           body: text,
           kind: kindForStatus(response.status),
           code: `HTTP_${response.status}`,
+          retryAfterMs:
+            response.status === 429 ? retryAfterMs(response.headers.get("retry-after")) : undefined,
         });
       }
       let parsed: unknown;
@@ -280,9 +346,11 @@ async function requestLLM(
       };
     } catch (error) {
       if (error instanceof LLMError) {
-        if (isRetryable(error) && attempt < MAX_ATTEMPTS) {
+        if (isRetryable(error) && attempt < attempts) {
           lastError = error;
-          console.warn(`[llm] ${error.kind} ${error.code}，${retryDelay(attempt)}ms 后重试（${attempt}/${MAX_ATTEMPTS - 1}）`);
+          console.warn(
+            `[llm] ${error.kind} ${error.code}，${retryDelay(attempt)}ms 后重试（${attempt}/${attempts - 1}）`,
+          );
           await sleep(retryDelay(attempt));
           continue;
         }
@@ -304,8 +372,10 @@ async function requestLLM(
       const failure = networkFailure(error);
       failure.attempts = attempt;
       lastError = failure;
-      if (attempt < MAX_ATTEMPTS) {
-        console.warn(`[llm] ${failure.code || "network"}，${retryDelay(attempt)}ms 后重试（${attempt}/${MAX_ATTEMPTS - 1}）`);
+      if (attempt < attempts) {
+        console.warn(
+          `[llm] ${failure.code || "network"}，${retryDelay(attempt)}ms 后重试（${attempt}/${attempts - 1}）`,
+        );
         await sleep(retryDelay(attempt));
         continue;
       }

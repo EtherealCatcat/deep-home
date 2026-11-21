@@ -1,5 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
-import { CheckCheck, ChevronLeft, ChevronRight, Feather, ImagePlus, ListPlus, LoaderCircle, Quote, Send, Smile, Sparkles, X } from "lucide-react";
+import { AlertTriangle, CheckCheck, ChevronLeft, ChevronRight, Feather, ImagePlus, ListPlus, LoaderCircle, Quote, RotateCcw, Send, Smile, Sparkles, X } from "lucide-react";
 import type { ChatMessage, QuoteRef, Status, Sticker } from "../types";
 import { API_BASE, api, formatDay, formatTime } from "../api";
 import { prepareImage, type PreparedImage } from "../image";
@@ -298,6 +298,7 @@ export function ChatView({
   onBurst,
   onCancelBurst,
   onNavigateSettings,
+  onRetry,
 }: {
   status: Status | null;
   messages: ChatMessage[];
@@ -308,6 +309,7 @@ export function ChatView({
   onBurst: (active: boolean) => Promise<void>;
   onCancelBurst: () => Promise<void>;
   onNavigateSettings: () => void;
+  onRetry: () => Promise<void>;
 }) {
   const [text, setText] = useState("");
   const [quote, setQuote] = useState<ChatMessage | null>(null);
@@ -316,6 +318,7 @@ export function ChatView({
   const [imageError, setImageError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [cancellingBurst, setCancellingBurst] = useState(false);
+  const [retrying, setRetrying] = useState(false);
   const [stickerOpen, setStickerOpen] = useState(false);
   const [stickers, setStickers] = useState<Sticker[]>([]);
   const [stickerPage, setStickerPage] = useState(0);
@@ -427,6 +430,21 @@ export function ChatView({
   const asleep = status?.rhythm.phase === "asleep";
   const burst = Boolean(status?.burst);
   const burstCount = status?.burstCount ?? 0;
+  const provider = status?.provider;
+  const lastChatError = status?.lastChatError;
+  const latestMessage = messages[messages.length - 1];
+  const providerBar = Boolean(provider && provider.state !== "ok") || Boolean(lastChatError);
+  const failedSend =
+    latestMessage?.role === "user" &&
+    !status?.busy &&
+    !status?.burst &&
+    (Boolean(provider && provider.state !== "ok") || Boolean(lastChatError));
+  const needsSettings =
+    provider?.state === "auth" ||
+    provider?.state === "config" ||
+    lastChatError?.kind === "auth" ||
+    lastChatError?.kind === "config";
+  const canRetry = failedSend && (lastChatError ? lastChatError.retryable : true);
   const stickerPageSize = 10;
 
   useEffect(() => {
@@ -439,6 +457,15 @@ export function ChatView({
     if (sending || preparing) return;
     if (text.trim() || image) await submit();
     await onBurst(false);
+  }
+
+  async function retry() {
+    setRetrying(true);
+    try {
+      await onRetry();
+    } finally {
+      setRetrying(false);
+    }
   }
 
   async function undoBurst() {
@@ -553,6 +580,37 @@ export function ChatView({
 
       <div className="border-t border-line/55 bg-[rgba(247,240,230,0.55)] px-4 pb-4 pt-3 backdrop-blur-md sm:px-7">
         <div className="mx-auto w-full max-w-[780px]">
+          {providerBar ? (
+            <div className="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1 rounded-xl border border-amber-300/50 bg-amber-50/70 px-3 py-2 text-[10.5px] text-ink-soft">
+              <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-700" />
+              {failedSend ? (
+                <span className="font-medium text-amber-800">这条没发出去</span>
+              ) : null}
+              <span className="min-w-0 flex-1">
+                {provider?.state && provider.state !== "ok" ? `${provider.label} · ${provider.detail}` : lastChatError?.message}
+              </span>
+              {needsSettings ? (
+                <button
+                  type="button"
+                  onClick={onNavigateSettings}
+                  className="shrink-0 rounded-full border border-ink/15 px-3 py-1 font-medium text-ink-soft transition hover:border-ink/25 hover:bg-white/70"
+                >
+                  去设置
+                </button>
+              ) : null}
+              {canRetry ? (
+                <button
+                  type="button"
+                  onClick={() => void retry()}
+                  disabled={retrying}
+                  className="flex shrink-0 items-center gap-1 rounded-full bg-amber-600 px-3 py-1 font-medium text-white transition hover:bg-amber-700 disabled:opacity-50"
+                >
+                  {retrying ? <LoaderCircle className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                  重试
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {burst ? (
             <div className="mb-2 flex items-center gap-2 rounded-xl border border-sea/25 bg-sea/[0.06] px-3 py-2">
               <ListPlus className="h-3.5 w-3.5 shrink-0 text-sea-deep" />

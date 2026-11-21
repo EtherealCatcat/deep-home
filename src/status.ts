@@ -10,6 +10,7 @@ import { todayUsage } from "./usage.js";
 import { lastAssistantMessageAt, lastOwnerMessageAt, todayMessageCount, todayProactiveCount } from "./chat.js";
 import type { StatusSnapshot } from "./events.js";
 import { loadOwn, ownStateSnapshot, recentOwnResult } from "./own.js";
+import { providerSnapshot, type ChatError } from "./provider.js";
 
 export function buildStatus(input: {
   config: AppConfig;
@@ -18,8 +19,9 @@ export function buildStatus(input: {
   burst: boolean;
   burstCount: number;
   unread: number;
+  lastChatError?: ChatError | null;
 }): StatusSnapshot {
-  const { config, paths, busy, burst, burstCount, unread } = input;
+  const { config, paths, busy, burst, burstCount, unread, lastChatError } = input;
   const now = Date.now();
   const life = loadLife(paths);
   const rhythm = getRhythm(config, life, now);
@@ -60,6 +62,8 @@ export function buildStatus(input: {
     lastOwnerAt: lastOwnerMessageAt(paths, config),
     lastMessageAt: lastAssistantMessageAt(paths, config),
     activity: own.active ? own.label : recentOwnResult(ownState, now) || room.status,
+    provider: providerSnapshot(),
+    lastChatError: lastChatError ?? undefined,
     own,
   };
 }

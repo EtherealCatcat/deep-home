@@ -265,7 +265,9 @@ export function SettingsView({
       const result = await api.testModel(next);
       setTestResult({
         ok: result.ok,
-        text: result.ok ? `连接正常：${result.text ?? "在的"}${result.model ? `（${result.model}）` : ""}` : result.error ?? "连接失败。",
+        text: result.ok
+          ? `连接正常：${result.text ?? "在的"}${result.model ? `（${result.model}）` : ""}（已恢复）`
+          : `${result.error ?? "连接失败。"}${result.kind ? `（${result.kind}${result.code ? ` / ${result.code}` : ""}）` : ""}`,
       });
     } catch (error) {
       setTestResult({ ok: false, text: error instanceof Error ? error.message : "连接失败。" });

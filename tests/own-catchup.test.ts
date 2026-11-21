@@ -18,10 +18,13 @@ import {
   saveOwn,
 } from "../src/own.js";
 import { readTimeline } from "../src/timeline.js";
-import { probeOnline } from "../src/llm.js";
+import { probeProviderReachable } from "../src/llm.js";
+import { localNetworkAvailable } from "../src/network.js";
 
-vi.mock("../src/llm.js", () => ({ probeOnline: vi.fn() }));
-const probe = vi.mocked(probeOnline);
+vi.mock("../src/llm.js", () => ({ probeProviderReachable: vi.fn() }));
+vi.mock("../src/network.js", () => ({ localNetworkAvailable: vi.fn(() => true) }));
+const probe = vi.mocked(probeProviderReachable);
+const networkUp = vi.mocked(localNetworkAvailable);
 
 const config = structuredClone(DEFAULT_CONFIG);
 config.model.apiKey = "sk-test";
@@ -89,6 +92,8 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   probe.mockReset();
+  networkUp.mockReset();
+  networkUp.mockReturnValue(true);
   for (const root of roots.splice(0)) fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -114,7 +119,7 @@ describe("maybeOwnTime offline", () => {
   it("keeps a pending window instead of burning the day when the probe fails", async () => {
     const { p, scheduler, runOwnTime } = setup();
     seedWindow(p, { nextAt: PLANNED, windowEnd: WINDOW_END, key: KEY });
-    probe.mockResolvedValue(false);
+    probe.mockResolvedValue({ reachable: false, kind: "unreachable" });
 
     await callOwn(scheduler, NOW);
 
@@ -128,10 +133,28 @@ describe("maybeOwnTime offline", () => {
     expect(readTimeline(p, DAY).some((event) => event.text.includes("没去成"))).toBe(false);
   });
 
-  it("turns a network failure into a pending window, without unread or a sad timeline", async () => {
+  it("skips the window when the provider fails but the machine is still online", async () => {
     const { p, scheduler, runOwnTime } = setup();
     seedWindow(p, { nextAt: PLANNED, windowEnd: WINDOW_END, key: KEY });
-    probe.mockResolvedValue(true);
+    probe.mockResolvedValue({ reachable: true, status: 200, kind: "ok" });
+    runOwnTime.mockResolvedValue({ ok: false, summary: "", shares: [], error: "网络没连上。", errorKind: "network" });
+
+    await callOwn(scheduler, NOW);
+
+    const own = loadOwn(p);
+    expect(own.pendingCatchUp).toBeNull();
+    expect(own.lastWindowKey).toBe(KEY);
+    expect(own.runsToday).toBe(1);
+    expect(own.unread).toBe(0);
+    expect(own.lastResult).toBe("");
+    expect(readTimeline(p, DAY).some((event) => event.text.includes("没去成"))).toBe(false);
+  });
+
+  it("creates a pending window when the network drops mid-run", async () => {
+    const { p, scheduler, runOwnTime } = setup();
+    seedWindow(p, { nextAt: PLANNED, windowEnd: WINDOW_END, key: KEY });
+    probe.mockResolvedValue({ reachable: true, status: 200, kind: "ok" });
+    networkUp.mockReturnValueOnce(true).mockReturnValue(false);
     runOwnTime.mockResolvedValue({ ok: false, summary: "", shares: [], error: "网络没连上。", errorKind: "network" });
 
     await callOwn(scheduler, NOW);
@@ -141,8 +164,6 @@ describe("maybeOwnTime offline", () => {
     expect(own.pendingCatchUp?.attempts).toBe(1);
     expect(own.runsToday).toBe(1);
     expect(own.unread).toBe(0);
-    expect(own.lastResult).toBe("");
-    expect(readTimeline(p, DAY).some((event) => event.text.includes("没去成"))).toBe(false);
   });
 
   it("lets the newest window replace an older pending one", async () => {
@@ -156,7 +177,7 @@ describe("maybeOwnTime offline", () => {
       now: NOW - 2 * 60 * 60_000,
     });
     saveOwn(p, own);
-    probe.mockResolvedValue(false);
+    probe.mockResolvedValue({ reachable: false, kind: "unreachable" });
 
     await callOwn(scheduler, new Date(`${DAY}T18:30:00+08:00`).getTime());
 
@@ -182,7 +203,7 @@ describe("maybeCatchUp", () => {
       nextRetryAt: NOW - 1_000,
     });
     saveOwn(p, state);
-    probe.mockResolvedValue(true);
+    probe.mockResolvedValue({ reachable: true, status: 200, kind: "ok" });
     runOwnTime.mockResolvedValue({ ok: true, summary: "看了一篇关于海的文章", shares: ["海很蓝"] });
 
     await callCatchUp(scheduler, NOW);

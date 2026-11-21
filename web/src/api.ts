@@ -137,10 +137,18 @@ export const api = {
       body: JSON.stringify({ config }),
     }),
   testModel: (config: Partial<AppConfig>) =>
-    request<{ ok: boolean; text?: string; model?: string; error?: string }>("/api/test-model", {
+    request<{
+      ok: boolean;
+      text?: string;
+      model?: string;
+      error?: string;
+      kind?: string;
+      code?: string;
+    }>("/api/test-model", {
       method: "POST",
       body: JSON.stringify({ config }),
     }),
+  retry: () => request<{ ok: boolean; count: number }>("/api/retry", { method: "POST" }),
   debug: () => request<DebugPayload>("/api/debug"),
   consolidate: () => request<{ ok: boolean; error?: string }>("/api/debug/consolidate", { method: "POST" }),
   backfillMilestones: () =>

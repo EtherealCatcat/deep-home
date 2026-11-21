@@ -17,7 +17,18 @@ import { dayKey, formatClock, nextClockTs } from "./time.js";
 import { timelineSummary, appendTimeline } from "./timeline.js";
 import { costPolicy, isPeak } from "./pricing.js";
 import { todayUsage, recordUsage } from "./usage.js";
-import { callLLM, LLMError, type LLMFailureKind } from "./llm.js";
+import {
+  BACKGROUND_ATTEMPTS,
+  BACKGROUND_TIMEOUT_MS,
+  CHAT_ATTEMPTS,
+  CHAT_TIMEOUT_MS,
+  SIDE_ATTEMPTS,
+  SIDE_TIMEOUT_MS,
+  callLLM,
+  LLMError,
+  type LLMFailureKind,
+} from "./llm.js";
+import type { ChatError } from "./provider.js";
 import { appendOwnLog } from "./web.js";
 import { cleanReply, parseReply, styleGuard, typingMs, gapMs } from "./reply.js";
 import { runToolLoop } from "./agentLoop.js";
@@ -51,6 +62,7 @@ export class ChatAgent {
   private sentInTurn = false;
   private historyFrom = 0;
   private debug: Record<string, unknown> | null = null;
+  private lastChatError: ChatError | null = null;
 
   constructor(
     private ctx: AgentContext,
@@ -64,6 +76,18 @@ export class ChatAgent {
 
   get pendingCount(): number {
     return this.pending.length;
+  }
+
+  get historyStart(): number {
+    return this.historyFrom;
+  }
+
+  getLastChatError(): ChatError | null {
+    return this.lastChatError;
+  }
+
+  clearLastChatError(): void {
+    this.lastChatError = null;
   }
 
   isHolding(): boolean {
@@ -302,7 +326,9 @@ export class ChatAgent {
         toolContext,
         kind: proactive ? "proactive" : "chat",
         signal: this.abort.signal,
+        llmOptions: { attempts: CHAT_ATTEMPTS, timeoutMs: CHAT_TIMEOUT_MS },
       });
+      this.lastChatError = null;
 
       let raw = result.content.trim();
       if (raw && styleGuard(raw).violation && !policy.isPeak && policy.budgetState !== "exhausted") {
@@ -369,8 +395,12 @@ export class ChatAgent {
       });
     } catch (error) {
       if (this.abort?.signal.aborted) return;
-      const message = error instanceof Error ? error.message : "出了点问题，稍后再试。";
-      this.emit({ type: "error", message });
+      const failure = error instanceof LLMError ? error : null;
+      const kind: LLMFailureKind = failure?.kind ?? "unknown";
+      const message = failure?.message ?? (error instanceof Error ? error.message : "出了点问题，稍后再试。");
+      const retryable = kind !== "auth" && kind !== "config";
+      this.lastChatError = { message, kind, at: Date.now(), retryable };
+      this.emit({ type: "error", message, kind, retryable, at: this.lastChatError.at });
     } finally {
       this.running = false;
       this.abort = null;
@@ -503,6 +533,7 @@ ${body}` },
         toolContext,
         kind: "own",
         signal: this.abort.signal,
+        llmOptions: { attempts: BACKGROUND_ATTEMPTS, timeoutMs: BACKGROUND_TIMEOUT_MS },
       });
 
       const summary = cleanReply(result.content).slice(0, 1200) || "在房间里坐了一会儿，什么也没做。";
@@ -594,7 +625,13 @@ ${body}` },
           { role: "assistant", content: raw },
           { role: "user", content: "（重说。就像平时发消息，短一点，别解释，别像助手。）" },
         ],
-        { maxTokens: Math.min(maxTokens, 300), temperature: 1.2, signal: this.abort?.signal },
+        {
+          maxTokens: Math.min(maxTokens, 300),
+          temperature: 1.2,
+          signal: this.abort?.signal,
+          attempts: SIDE_ATTEMPTS,
+          timeoutMs: SIDE_TIMEOUT_MS,
+        },
       );
       recordUsage(paths, config, {
         model: result.model,
@@ -705,7 +742,15 @@ ${body}` },
               content: `${config.ownerTitle}：${userText.slice(0, 1200)}\n${config.name}：${replyText.slice(0, 1200)}`,
             },
           ],
-          { maxTokens: 180, model: config.model.sideModel, temperature: 0.2, json: true, signal: this.abort?.signal },
+          {
+            maxTokens: 180,
+            model: config.model.sideModel,
+            temperature: 0.2,
+            json: true,
+            signal: this.abort?.signal,
+            attempts: SIDE_ATTEMPTS,
+            timeoutMs: SIDE_TIMEOUT_MS,
+          },
         );
         recordUsage(paths, config, {
           model: result.model,

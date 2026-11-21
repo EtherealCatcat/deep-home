@@ -33,7 +33,15 @@ import {
   saveOwn,
   takeFreshShares,
 } from "./own.js";
-import { probeOnline } from "./llm.js";
+import { probeProviderReachable } from "./llm.js";
+import { localNetworkAvailable } from "./network.js";
+import {
+  noteProviderProbe,
+  providerAllowsEssential,
+  providerAllowsNonEssential,
+  providerRetryAt,
+  providerSnapshot,
+} from "./provider.js";
 
 export interface SchedulerContext {
   config: AppConfig;
@@ -102,8 +110,10 @@ export class Scheduler {
     saveLife(paths, life);
 
     const rhythm = getRhythm(config, life, now);
+    const providerOk = providerAllowsNonEssential();
 
-    if (!agent.isHolding()) await this.fireReminders(now, rhythm);
+    // 供应商故障时不发提醒也不写日记：提醒留在队列里，等恢复后再补。
+    if (!agent.isHolding() && providerOk) await this.fireReminders(now, rhythm);
 
     // 自己的时间先跑：它可能决定这一轮要不要补跑，日记/整理也得等它落定。
     if (config.web.ownTimeEnabled && !agent.busy) {
@@ -115,7 +125,7 @@ export class Scheduler {
     let policy = costPolicy(config, todayUsage(paths, config), now);
 
     // 有待补跑的窗口时，先别写今天的日记/整理；补跑回来后那才是“今天”的完整记录。
-    if (!pending) {
+    if (!pending && providerOk) {
       await this.processDeferred(now, policy, rhythm);
 
       life = loadLife(paths);
@@ -160,14 +170,16 @@ export class Scheduler {
     }
 
     // 先把昨晚/静默期记下的话补发掉，再考虑新的自己的时间；两条主动消息不要同一分钟抢着说。
-    const flushed = pending ? 0 : await this.flushPendingShares(now, rhythm);
+    const flushed = pending || !providerOk ? 0 : await this.flushPendingShares(now, rhythm);
     this.maybeDecayRoom(now);
 
     policy = costPolicy(config, todayUsage(paths, config), now);
-    if (!pending && flushed === 0 && policy.allowProactive && !agent.busy) {
+    if (!pending && providerOk && flushed === 0 && policy.allowProactive && !agent.busy) {
       await this.maybeSpeak(now, rhythm);
     }
 
+    // 到点的熔断顺手探一下，通了下一轮就恢复。
+    await this.maybeProbeProvider(now);
     onChange();
   }
 
@@ -238,24 +250,12 @@ export class Scheduler {
       return;
     }
 
-    // 权限按实际时间算（可能在这次 tick 里刚花过钱），补跑也一样。
-    const policy = costPolicy(config, todayUsage(paths, config), now);
-    if (!policy.allowOwnTime) {
-      saveOwn(paths, own);
-      return;
-    }
-
     const plannedAt = own.nextAt;
     const windowEnd = own.windowEnd;
     const missedKey = own.windowKey;
 
-    // 新窗口要试了，旧的补跑就被取代——只补最近一个。
-    if (own.pendingCatchUp && own.pendingCatchUp.key !== missedKey) {
-      own.pendingCatchUp = null;
-    }
-
-    // 先花 3 秒确认真的能连上，别让断网时的模型重试白烧一轮。
-    if (!(await probeOnline(config))) {
+    // 本机完全没网：是用户这边断了，按 v1 的离线补跑处理，别记成她没去。
+    if (!localNetworkAvailable()) {
       own.lastWindowKey = missedKey;
       own.pendingCatchUp = createPendingCatchUp({ key: missedKey, plannedAt, windowEnd, now });
       own.activeUntil = 0;
@@ -266,6 +266,46 @@ export class Scheduler {
       this.ctx.onChange();
       return;
     }
+
+    // 供应商熔断/Key 问题：这一窗直接跳过，不补跑，也不留失败的痕迹。
+    if (!providerAllowsEssential(now)) {
+      own.lastWindowKey = missedKey;
+      own.activeUntil = 0;
+      own.nextAt = 0;
+      own.windowEnd = 0;
+      own.windowKey = "";
+      saveOwn(paths, ensureOwnSchedule(config, now, own));
+      this.ctx.onChange();
+      return;
+    }
+
+    // 权限按实际时间算（可能在这次 tick 里刚花过钱），补跑也一样。
+    const policy = costPolicy(config, todayUsage(paths, config), now);
+    if (!policy.allowOwnTime) {
+      saveOwn(paths, own);
+      return;
+    }
+
+    // 新窗口要试了，旧的补跑就被取代——只补最近一个。
+    if (own.pendingCatchUp && own.pendingCatchUp.key !== missedKey) {
+      own.pendingCatchUp = null;
+    }
+
+    // 先花 3 秒确认真的能连上，别让断网时的模型重试白烧一轮。
+    const probe = await probeProviderReachable(config);
+    if (!probe.reachable) {
+      noteProviderProbe(false);
+      own.lastWindowKey = missedKey;
+      own.pendingCatchUp = createPendingCatchUp({ key: missedKey, plannedAt, windowEnd, now });
+      own.activeUntil = 0;
+      own.nextAt = 0;
+      own.windowEnd = 0;
+      own.windowKey = "";
+      saveOwn(paths, ensureOwnSchedule(config, now, own));
+      this.ctx.onChange();
+      return;
+    }
+    noteProviderProbe(true, probe.status);
 
     markOwnStart(own, now, windowEnd);
     saveOwn(paths, own);
@@ -314,26 +354,33 @@ export class Scheduler {
     if (isInfraFailure(result.errorKind)) {
       own.runsToday = Math.max(0, own.runsToday - 1);
       own.lastWindowKey = missedKey;
-      own.pendingCatchUp = createPendingCatchUp({
-        key: missedKey,
-        plannedAt,
-        windowEnd,
-        now: actualNow,
-        attempts: 1,
-        nextRetryAt: actualNow + catchUpBackoff(1),
-        lastErrorKind: result.errorKind,
-        lastError: result.error || "网络没连上。",
-      });
-      // 不 markOwnEnd、不 unread、不写「没去成」：失败了也不该留下痕迹。
+      if (!localNetworkAvailable()) {
+        // 跑的时候网断了：用户侧问题，下一次联网补跑。
+        own.pendingCatchUp = createPendingCatchUp({
+          key: missedKey,
+          plannedAt,
+          windowEnd,
+          now: actualNow,
+          attempts: 1,
+          nextRetryAt: actualNow + catchUpBackoff(1),
+          lastErrorKind:
+            result.errorKind === "rate" || result.errorKind === "timeout" || result.errorKind === "server"
+              ? result.errorKind
+              : "network",
+          lastError: result.error || "网络没连上。",
+        });
+      }
+      // 供应商故障不补跑：只排下一窗口，不 markOwnEnd、不 unread、不写「没去成」。
       saveOwn(paths, ensureOwnSchedule(config, actualNow, own));
       this.ctx.onChange();
       return;
     }
 
-    // auth / unknown / 早退：这次不算，也不补跑。
+    // auth / config / unknown / 早退：这次不算，也不补跑。
     own.runsToday = Math.max(0, own.runsToday - 1);
+    own.lastWindowKey = missedKey;
     if (result.errorKind === "auth" && result.error) {
-      this.ctx.emit({ type: "error", message: result.error });
+      this.ctx.emit({ type: "error", message: result.error, kind: "auth", retryable: false });
     } else if (result.error) {
       console.warn(`[own] ${result.errorKind ?? "unknown"}: ${result.error}`);
     }
@@ -380,6 +427,25 @@ export class Scheduler {
       return;
     }
 
+    // 用户侧断网：补跑保留，继续退避，等网回来。
+    if (!localNetworkAvailable()) {
+      pending.attempts += 1;
+      pending.lastErrorKind = "network";
+      pending.lastError = "网络没连上。";
+      pending.nextRetryAt = now + catchUpBackoff(pending.attempts);
+      own.pendingCatchUp = pending;
+      saveOwn(paths, own);
+      return;
+    }
+
+    // 供应商侧故障：不硬试，等它恢复（或者熔断到点）再说。
+    if (!providerAllowsEssential(now)) {
+      pending.nextRetryAt = Math.max(now + catchUpBackoff(pending.attempts), providerRetryAt());
+      own.pendingCatchUp = pending;
+      saveOwn(paths, own);
+      return;
+    }
+
     const policy = costPolicy(config, todayUsage(paths, config), now);
     if (!policy.allowOwnTime) {
       pending.nextRetryAt = policy.isPeak
@@ -390,15 +456,18 @@ export class Scheduler {
       return;
     }
 
-    if (!(await probeOnline(config))) {
+    const probe = await probeProviderReachable(config);
+    if (!probe.reachable) {
+      noteProviderProbe(false);
       pending.attempts += 1;
       pending.lastErrorKind = "network";
-      pending.lastError = "网络没连上。";
+      pending.lastError = "模型服务暂时连不上。";
       pending.nextRetryAt = now + catchUpBackoff(pending.attempts);
       own.pendingCatchUp = pending;
       saveOwn(paths, own);
       return;
     }
+    noteProviderProbe(true, probe.status);
 
     const result = await agent.runOwnTime(pending.plannedAt, pending.windowEnd, { catchUp: true });
     const actualNow = Date.now();
@@ -418,11 +487,13 @@ export class Scheduler {
     own = loadOwn(paths);
     pending = own.pendingCatchUp ?? pending;
 
-    if (result.errorKind === "auth" || result.errorKind === "aborted") {
+    if (result.errorKind === "auth" || result.errorKind === "config" || result.errorKind === "aborted") {
       own.pendingCatchUp = null;
       saveOwn(paths, own);
       if (result.errorKind === "auth" && result.error) {
-        this.ctx.emit({ type: "error", message: result.error });
+        this.ctx.emit({ type: "error", message: result.error, kind: "auth", retryable: false });
+      } else if (result.errorKind === "config") {
+        console.warn(`[catchup] config: ${result.error ?? ""}`);
       }
       return;
     }
@@ -531,6 +602,17 @@ export class Scheduler {
         event: { ts: Date.now(), kind: "remind", text: reminder.text },
       });
     }
+  }
+
+  /** down/rate 到点后探一次；只有真能用的端点才恢复。 */
+  private async maybeProbeProvider(now: number): Promise<void> {
+    const snapshot = providerSnapshot();
+    const due =
+      (snapshot.state === "down" && now >= snapshot.openUntil) ||
+      (snapshot.state === "rate" && now >= snapshot.retryAt);
+    if (!due) return;
+    const probe = await probeProviderReachable(this.ctx.config);
+    noteProviderProbe(probe.reachable, probe.status);
   }
 
   private async maybeSpeak(now: number, rhythm: ReturnType<typeof getRhythm>): Promise<void> {
