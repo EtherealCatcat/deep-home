@@ -139,6 +139,22 @@ export function parseClock(value: string): { hour: number; minute: number } | nu
   return { hour, minute };
 }
 
+/** 下一个 "HH:MM" 或当天分钟数（如 480）的时间戳；已经过了就是明天。 */
+export function nextClockTs(now: number, clock: string | number, timeZone = "Asia/Shanghai"): number {
+  const parsed =
+    typeof clock === "number"
+      ? clock >= 0 && clock < 24 * 60
+        ? { hour: Math.floor(clock / 60), minute: clock % 60 }
+        : null
+      : parseClock(clock);
+  if (!parsed) return now;
+  const p = zonedParts(now, timeZone);
+  const todayTs = zonedTimeToTs(p.year, p.month, p.day, parsed.hour, parsed.minute, timeZone);
+  if (todayTs > now) return todayTs;
+  const [year, month, day] = addDays(dateKeyOfParts(p), 1).split("-").map(Number);
+  return zonedTimeToTs(year, month, day, parsed.hour, parsed.minute, timeZone);
+}
+
 export function humanGap(ms: number): string {
   const min = Math.max(0, Math.round(ms / 60_000));
   if (min < 1) return "刚刚";

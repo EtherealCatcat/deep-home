@@ -140,6 +140,11 @@ export interface ChatMessage {
   quote?: QuoteRef;
 }
 
+export interface PendingShare {
+  text: string;
+  ts: number;
+}
+
 export interface OwnTimeState {
   nextAt: number;
   windowEnd: number;
@@ -153,7 +158,7 @@ export interface OwnTimeState {
   unread: number;
   shareDay: string;
   shareCount: number;
-  pendingShares: string[];
+  pendingShares: PendingShare[];
   /** 当天失败后用掉的那次补跑（避免一整天反复重试烧额度）。 */
   retryDay?: string;
   updatedAt: number;

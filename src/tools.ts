@@ -24,6 +24,11 @@ export interface ToolContext {
   now: number;
   outbox: OutboxItem[];
   diaryText?: string;
+  /**
+   * 自己时间里 tell_owner 的去向。由 agent 决定：直接发、记到明天早上发、或今天说得够多了。
+   * 返回一句诚实的回执，让模型知道到底说没说出去。
+   */
+  tellOwner?: (text: string) => string;
 }
 
 interface ToolDefinition {
@@ -242,6 +247,7 @@ const TOOLS: ToolDefinition[] = [
     run(ctx, args) {
       const text = str(args, "text");
       if (!text) return "（还是先不说了。）";
+      if (ctx.tellOwner) return ctx.tellOwner(text);
       ctx.outbox.push({ kind: "text", text });
       return "（说给他听了。）";
     },

@@ -9,7 +9,7 @@ import { costPolicy } from "./pricing.js";
 import { todayUsage } from "./usage.js";
 import { lastAssistantMessageAt, lastOwnerMessageAt, todayMessageCount, todayProactiveCount } from "./chat.js";
 import type { StatusSnapshot } from "./events.js";
-import { loadOwn, ownStateSnapshot } from "./own.js";
+import { loadOwn, ownStateSnapshot, recentOwnResult } from "./own.js";
 
 export function buildStatus(input: {
   config: AppConfig;
@@ -27,7 +27,8 @@ export function buildStatus(input: {
   const room = loadRoom(paths);
   const relationship = loadRelationship(paths, config);
   const usage = todayUsage(paths, config);
-  const own = ownStateSnapshot(loadOwn(paths), config, now);
+  const ownState = loadOwn(paths);
+  const own = ownStateSnapshot(ownState, config, now);
   return {
     name: config.name.trim() || "某鱼",
     ownerTitle: config.ownerTitle.trim() || "主人",
@@ -58,7 +59,7 @@ export function buildStatus(input: {
     proactiveToday: todayProactiveCount(paths, config),
     lastOwnerAt: lastOwnerMessageAt(paths, config),
     lastMessageAt: lastAssistantMessageAt(paths, config),
-    activity: own.active ? own.label : room.status,
+    activity: own.active ? own.label : recentOwnResult(ownState, now) || room.status,
     own,
   };
 }

@@ -1,4 +1,4 @@
-import type { AppConfig, OwnTimeState } from "./types.js";
+import type { AppConfig, OwnTimeState, PendingShare } from "./types.js";
 import type { Paths } from "./config.js";
 import { readJson, writeJson } from "./store.js";
 import { addDays, dayKey, formatClock, zonedParts, zonedTimeToTs } from "./time.js";
@@ -42,12 +42,27 @@ export function defaultOwnTimeState(): OwnTimeState {
   };
 }
 
+function normalizeShare(item: unknown): PendingShare | null {
+  if (typeof item === "string") {
+    const text = item.trim();
+    return text ? { text, ts: 0 } : null;
+  }
+  if (!item || typeof item !== "object") return null;
+  const raw = item as Partial<PendingShare>;
+  const text = typeof raw.text === "string" ? raw.text.trim() : "";
+  if (!text) return null;
+  const ts = typeof raw.ts === "number" && Number.isFinite(raw.ts) ? raw.ts : 0;
+  return { text, ts };
+}
+
 export function loadOwn(p: Paths): OwnTimeState {
   const raw = readJson<Partial<OwnTimeState>>(ownFile(p), {});
+  const shares = Array.isArray(raw.pendingShares) ? raw.pendingShares.map(normalizeShare) : [];
   return {
     ...defaultOwnTimeState(),
     ...raw,
-    pendingShares: Array.isArray(raw.pendingShares) ? raw.pendingShares.filter((s): s is string => typeof s === "string") : [],
+    // 旧版本存的是字符串，读进来时统一成 {text, ts}（ts=0 视为来历不明，稍后丢弃）。
+    pendingShares: shares.filter((item): item is PendingShare => Boolean(item)).slice(-6),
   };
 }
 
@@ -127,8 +142,12 @@ export function ensureOwnSchedule(
   if (state.day !== today) {
     state.day = today;
     state.runsToday = 0;
-    state.shareDay = today;
-    state.shareCount = 0;
+    // 分享配额按 shareDay 单独重置：补发可能已经先把 shareDay 推到今天，
+    // 这里再清零会把刚记上的次数抹掉，导致早上多发一轮。
+    if (state.shareDay !== today) {
+      state.shareDay = today;
+      state.shareCount = 0;
+    }
   }
   if (state.activeUntil && state.activeUntil <= now) state.activeUntil = 0;
   if (state.activeUntil > now) return state;
@@ -208,17 +227,37 @@ export function canShareNow(state: OwnTimeState, config: AppConfig, now: number)
   return !isQuietHours(config, now);
 }
 
-export function queueShare(state: OwnTimeState, text: string): void {
+export function queueShare(state: OwnTimeState, text: string, ts: number = Date.now()): void {
   const clean = text.trim();
   if (!clean) return;
-  if (!state.pendingShares.includes(clean)) state.pendingShares.push(clean);
+  if (state.pendingShares.some((item) => item.text === clean)) return;
+  state.pendingShares.push({ text: clean, ts });
   state.pendingShares = state.pendingShares.slice(-6);
 }
 
-export function takeShares(state: OwnTimeState): string[] {
-  const list = state.pendingShares;
+/**
+ * 取出今天还能补发的排队分享。队列里的 ts 是“允许发送的时间”（静默结束的早上），
+ * 所以跨过逻辑日边界也能发；不属于今天的一律丢掉，避免把几天前的话倒出来。
+ * 没有时间戳的旧记录（ts=0）同样丢掉。
+ */
+export function takeFreshShares(
+  state: OwnTimeState,
+  config: AppConfig,
+  now: number,
+): PendingShare[] {
+  const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
+  const all = state.pendingShares;
   state.pendingShares = [];
-  return list;
+  return all.filter(
+    (item) => item.ts > 0 && dayKey(item.ts, config.behavior.rotateHour, config.behavior.timezone) === today,
+  );
+}
+
+/** 最近一次自己时间的结果；太久了就不往聊天/状态里带，避免“刚才”永远是昨天。 */
+export function recentOwnResult(state: OwnTimeState, now: number, maxAgeMs: number = 12 * 60 * 60_000): string {
+  if (!state.lastResult || !state.lastRunAt) return "";
+  if (now - state.lastRunAt > maxAgeMs || state.lastRunAt > now) return "";
+  return `刚才${state.lastResult.replace(/\s+/g, " ").trim().slice(0, 60)}`;
 }
 
 export function ownStateSnapshot(state: OwnTimeState, config: AppConfig, now: number) {

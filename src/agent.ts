@@ -5,15 +5,15 @@ import type { Paths } from "./config.js";
 import type { MemoryStore } from "./memory.js";
 import type { ServerEvent } from "./events.js";
 import { buildNow, buildSystem } from "./persona.js";
-import { getRhythm, rhythmPrompt } from "./rhythm.js";
+import { getRhythm, isQuietHours, rhythmPrompt } from "./rhythm.js";
 import { loadLife } from "./life.js";
 import { loadMood, saveMood, applyMood, heuristicMood, moodDeltaFromJson } from "./mood.js";
-import { loadRoom } from "./room.js";
+import { loadRoom, roomAction, roomActionForOwnTime } from "./room.js";
 import { loadRelationship, saveRelationship, updateStreak } from "./relationship.js";
 import { loadReminders, pendingReminders } from "./care.js";
 import { listStickers, ensureStickers, findSticker } from "./stickers.js";
 import { appendChatMessage, messagesBefore, quoteLine, toLLMHistory, yesterdayDigest, todayMessageCount, todayProactiveCount, lastOwnerMessageAt, ensureSession } from "./chat.js";
-import { dayKey, formatClock } from "./time.js";
+import { dayKey, formatClock, nextClockTs } from "./time.js";
 import { timelineSummary, appendTimeline } from "./timeline.js";
 import { costPolicy, isPeak } from "./pricing.js";
 import { todayUsage, recordUsage } from "./usage.js";
@@ -22,6 +22,7 @@ import { appendOwnLog } from "./web.js";
 import { cleanReply, parseReply, styleGuard, typingMs, gapMs } from "./reply.js";
 import { runToolLoop } from "./agentLoop.js";
 import type { ToolContext, OutboxItem } from "./tools.js";
+import { loadOwn, queueShare, recentOwnResult, resetShareDay, saveOwn } from "./own.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -252,6 +253,7 @@ export class ChatAgent {
         recalls,
         justRemembered,
         stickers,
+        activity: recentOwnResult(loadOwn(paths), now),
       });
 
       const body = proactive
@@ -452,6 +454,28 @@ export class ChatAgent {
 </内心>`;
 
       const outbox: OutboxItem[] = [];
+      // tell_owner 要说实话：能发、只能记到早上、或者今天已经说得够多了，三种回执不一样。
+      const tellOwner = (text: string): string => {
+        const state = loadOwn(paths);
+        resetShareDay(state, config, now);
+        const outgoing = outbox.filter((item) => item.kind === "text").length;
+        // 已经排到早上的话也占当天的名额，免得她一句接一句地“先记着”。
+        const remaining = config.speak.tellOwnerMaxPerDay - state.shareCount - state.pendingShares.length - outgoing;
+        if (remaining <= 0) return "（今天说得够多了，先不说了。）";
+        if (isQuietHours(config, now)) {
+          // 记下的是“明天早上静默结束”的时刻，晚上收尾时说的话不会因为过了 5 点就作废。
+          queueShare(state, text, nextClockTs(now, config.speak.quietEnd, config.behavior.timezone));
+          saveOwn(paths, state);
+          appendTimeline(paths, config, {
+            kind: "share",
+            text: `想分享，先记着：${text.replace(/\s+/g, " ").slice(0, 80)}`,
+            ts: now,
+          });
+          return "（先记着，早上再说。）";
+        }
+        outbox.push({ kind: "text", text });
+        return "（说给他听了。）";
+      };
       const toolContext: ToolContext = {
         config,
         paths,
@@ -459,6 +483,7 @@ export class ChatAgent {
         memory,
         now,
         outbox,
+        tellOwner,
       };
       const result = await runToolLoop({
         config,
@@ -478,6 +503,13 @@ ${body}` },
       });
 
       const summary = cleanReply(result.content).slice(0, 1200) || "在房间里坐了一会儿，什么也没做。";
+      // 她没主动 room_do 的话，房间也要跟着她刚做过的事变一下。
+      if (!result.toolCalls.some((call) => call.name === "room_do")) {
+        const action = roomActionForOwnTime(result.toolCalls.map((call) => call.name));
+        const nextRoom = roomAction(paths, action);
+        appendTimeline(paths, config, { kind: "room", text: nextRoom.status, ts: now, meta: { from: "own" } });
+        this.onChange();
+      }
       appendOwnLog(paths, config, summary, now);
       const shares = outbox.filter((item) => item.kind === "text").map((item) => item.text.trim()).filter(Boolean);
       const nextMood = applyMood(loadMood(paths, config), { ...heuristicMood(summary), source: "own" }, config);

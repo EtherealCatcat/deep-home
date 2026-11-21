@@ -8,12 +8,12 @@ import { getRhythm, isQuietHours } from "./rhythm.js";
 import { costPolicy } from "./pricing.js";
 import { todayUsage } from "./usage.js";
 import { loadMood } from "./mood.js";
-import { loadRoom } from "./room.js";
+import { loadRoom, roomAction, roomIsStale } from "./room.js";
 import { dueReminders, markReminderDone } from "./care.js";
 import { diaryTarget, writeDiary } from "./diary.js";
 import { consolidateMemory, hasInbox } from "./consolidate.js";
 import { lastAssistantMessageAt, lastOwnerMessageAt, todayProactiveCount } from "./chat.js";
-import { dayKey, formatClock, humanGap, zonedParts } from "./time.js";
+import { dayKey, formatClock, humanGap, nextClockTs, zonedParts } from "./time.js";
 import { appendTimeline } from "./timeline.js";
 import { addMilestone } from "./relationship.js";
 import {
@@ -22,8 +22,11 @@ import {
   loadOwn,
   markOwnEnd,
   markOwnStart,
+  queueShare,
+  resetShareDay,
   saveOwn,
   scheduleOwnRetry,
+  takeFreshShares,
 } from "./own.js";
 
 export interface SchedulerContext {
@@ -139,11 +142,15 @@ export class Scheduler {
 
     if (!agent.isHolding()) await this.fireReminders(now, rhythm);
 
+    // 先把昨晚静默期记下的话补发掉，再考虑新的自己的时间；两条主动消息不要同一分钟抢着说。
+    const flushed = await this.flushPendingShares(now, rhythm);
+    this.maybeDecayRoom(now);
+
     if (config.web.ownTimeEnabled && !agent.busy) {
       await this.maybeOwnTime(now, rhythm, policy);
     }
 
-    if (policy.allowProactive && !agent.busy) {
+    if (flushed === 0 && policy.allowProactive && !agent.busy) {
       await this.maybeSpeak(now, rhythm);
     }
 
@@ -251,9 +258,9 @@ export class Scheduler {
           await agent.say(share, true);
           own.shareCount += 1;
           appendTimeline(paths, config, { kind: "share", text: `忍不住告诉他：${share.slice(0, 80)}` });
-        } else {
-          own.pendingShares.push(share);
-          own.pendingShares = own.pendingShares.slice(-6);
+        } else if (isQuietHours(config, Date.now())) {
+          // 静默期才排队；配额用完的话 tell_owner 已经跟她说清楚了，不悄悄攒着。
+          queueShare(own, share, nextClockTs(Date.now(), config.speak.quietEnd, config.behavior.timezone));
           appendTimeline(paths, config, { kind: "share", text: `想分享，先记着：${share.slice(0, 80)}` });
         }
       }
@@ -265,6 +272,50 @@ export class Scheduler {
       });
     }
     saveOwn(paths, own);
+    this.ctx.onChange();
+  }
+
+  /**
+   * 静默期记下的分享，等安静过去再补发。只补同一个逻辑日里的：
+   * 过了一天的话已经不属于“早上”了，直接丢掉，避免把几天前的话一次性倒出来。
+   */
+  private async flushPendingShares(now: number, rhythm: ReturnType<typeof getRhythm>): Promise<number> {
+    const { config, paths, agent } = this.ctx;
+    if (agent.busy || agent.isHolding()) return 0;
+    // 关掉主动关心时，排队的话先留在队列里；当天没发出去就自然过期。
+    if (!config.speak.enabled) return 0;
+    if (isQuietHours(config, now) || rhythm.phase === "asleep") return 0;
+    const own = loadOwn(paths);
+    if (!own.pendingShares.length) return 0;
+
+    resetShareDay(own, config, now);
+    const fresh = takeFreshShares(own, config, now);
+    const quota = Math.max(0, config.speak.tellOwnerMaxPerDay - own.shareCount);
+    const send = quota > 0 ? fresh.slice(-quota) : [];
+    for (const item of send) {
+      await agent.say(item.text, true);
+      own.shareCount += 1;
+      appendTimeline(paths, config, { kind: "share", text: `早上才告诉他：${item.text.slice(0, 80)}` });
+    }
+    saveOwn(paths, own);
+    if (send.length) this.ctx.onChange();
+    return send.length;
+  }
+
+  /** 房间太久没动静，就回落成中性的“在书桌前发呆”。 */
+  private maybeDecayRoom(now: number): void {
+    const { config, paths } = this.ctx;
+    const own = loadOwn(paths);
+    if (own.activeUntil > now) return;
+    const room = loadRoom(paths);
+    if (!roomIsStale(room, now)) return;
+    if (room.status === "在书桌前发呆") return;
+    const next = roomAction(paths, "发呆");
+    appendTimeline(paths, config, {
+      kind: "room",
+      text: `${next.status}（安静了一阵）`,
+      meta: { from: "decay" },
+    });
     this.ctx.onChange();
   }
 

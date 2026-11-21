@@ -57,3 +57,23 @@ export function roomLook(room: RoomState): string {
 export function roomSnapshot(p: Paths): RoomState {
   return loadRoom(p);
 }
+
+/** 房间多久没变就算“没人待着”了。 */
+export const ROOM_STALE_MS = 6 * 60 * 60_000;
+
+export function roomIsStale(room: RoomState, now: number): boolean {
+  if (!room.updatedAt) return true;
+  return now - room.updatedAt >= ROOM_STALE_MS;
+}
+
+/**
+ * 自己时间里做了什么，房间就跟着变成什么样。
+ * 她显式调过 room_do 时不走这里。
+ */
+export function roomActionForOwnTime(toolNames: string[]): string {
+  if (toolNames.includes("note_write")) return "收拾";
+  if (toolNames.includes("web_read") || toolNames.includes("rss_read") || toolNames.includes("web_search")) {
+    return "看书";
+  }
+  return "发呆";
+}
