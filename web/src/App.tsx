@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, X } from "lucide-react";
 import { API_BASE, api, assetUrl, isTauri } from "./api";
-import { initNotifications, notifyMessage, setNotificationsEnabled } from "./notify";
+import { initNotifications, notifyDiary, notifyMessage, setCharacterName, setNotificationsEnabled } from "./notify";
 import { AvatarContext, DEFAULT_AVATAR } from "./avatar";
 import type { ChatMessage, Page, ServerEvent, Status } from "./types";
 import { Sidebar } from "./components/Sidebar";
@@ -82,6 +82,7 @@ export default function App() {
     void api
       .settings()
       .then(({ config }) => {
+        setCharacterName(config.name);
         setNotificationsEnabled(config.ui.notificationsEnabled);
         if (config.ui.notificationsEnabled) void initNotifications();
       })
@@ -89,6 +90,10 @@ export default function App() {
         void initNotifications();
       });
   }, []);
+
+  useEffect(() => {
+    if (status?.name) setCharacterName(status.name);
+  }, [status?.name]);
 
   useEffect(() => {
     if (!isTauri() || !status) return;
@@ -193,6 +198,7 @@ export default function App() {
           break;
         case "diary":
           showToast("她写完了今天的日记。");
+          void notifyDiary();
           break;
         case "burst_cancel":
           setMessages((prev) =>
