@@ -256,10 +256,6 @@ export default function App() {
   }, [page, status?.own?.unread]);
 
   async function sendSticker(name: string) {
-    if (status?.burst) {
-      showToast("连发中先只发文字，表情等她收完再发。", "error");
-      return;
-    }
     try {
       const result = await api.sendSticker(name);
       addMessage(result.message);

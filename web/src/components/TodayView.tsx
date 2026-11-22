@@ -343,27 +343,27 @@ export function TodayView({ status, showToast }: { status: Status | null; showTo
               </div>
             )}
             <div className="mt-2 space-y-2 border-t border-line/50 pt-3">
+              <input
+                value={newText}
+                onChange={(event) => setNewText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") void addReminder();
+                }}
+                placeholder="提醒她什么？"
+                className="input-warm min-w-0"
+              />
               <div className="flex gap-2">
-                <input
-                  value={newText}
-                  onChange={(event) => setNewText(event.target.value)}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") void addReminder();
-                  }}
-                  placeholder="提醒她……"
-                  className="input-warm min-w-0 flex-1 py-1.5 text-[11.5px]"
-                />
                 <input
                   value={newDue}
                   onChange={(event) => setNewDue(event.target.value)}
-                  className="input-warm w-[92px] py-1.5 text-[11.5px]"
+                  className="input-warm min-w-0 flex-1"
                   placeholder="明天 09:00"
                 />
                 <button
                   type="button"
                   onClick={() => void addReminder()}
                   disabled={adding || !newText.trim()}
-                  className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-coral text-white disabled:opacity-40"
+                  className="grid w-8 shrink-0 place-items-center rounded-lg bg-coral text-white disabled:opacity-40"
                   title="添加提醒"
                 >
                   {adding ? (

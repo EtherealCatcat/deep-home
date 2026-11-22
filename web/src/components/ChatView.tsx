@@ -417,7 +417,7 @@ export function ChatView({
   }
 
   async function chooseSticker(sticker: Sticker) {
-    if (!sticker.file || sending || preparing || burst) return;
+    if (!sticker.file || sending || preparing) return;
     setSending(true);
     try {
       await onSticker(sticker.name);
@@ -814,11 +814,11 @@ export function ChatView({
             <button
               type="button"
               onClick={() => setStickerOpen((value) => !value)}
-              disabled={sending || preparing || burst}
+              disabled={sending || preparing}
               className={`mb-0.5 grid h-9 w-9 shrink-0 place-items-center rounded-full transition disabled:opacity-40 ${
                 stickerOpen ? "bg-coral/15 text-coral-deep" : "text-ink-faint hover:bg-white/70 hover:text-coral"
               }`}
-              title={burst ? "连发时先只发文字" : stickerOpen ? "收起表情" : "发一个表情"}
+              title={burst ? "连发中：表情也会攒着，点「发完了」再交给她" : stickerOpen ? "收起表情" : "发一个表情"}
               aria-label="表情"
               aria-expanded={stickerOpen}
             >

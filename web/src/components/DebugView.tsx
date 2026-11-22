@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Braces,
   CheckCircle2,
@@ -38,10 +38,45 @@ const debugTabs: { key: DebugTab; label: string }[] = [
 ];
 
 function Pre({ text }: { text: string }) {
+  const [open, setOpen] = useState(false);
+  const [overflowing, setOverflowing] = useState(false);
+  const ref = useRef<HTMLPreElement>(null);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setOverflowing(el.scrollHeight > el.clientHeight + 2);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text, open]);
+
   return (
-    <pre className="max-h-[430px] overflow-auto rounded-xl border border-line/60 bg-[rgba(255,252,247,0.5)] p-3.5 font-mono text-[10.5px] leading-5 whitespace-pre-wrap break-words text-ink-soft">
-      {text || "（空）"}
-    </pre>
+    <div>
+      <pre
+        ref={ref}
+        className={`rounded-xl border border-line/60 bg-[rgba(255,252,247,0.5)] p-3.5 font-mono text-[10.5px] leading-5 whitespace-pre-wrap break-words text-ink-soft ${
+          open ? "" : "max-h-[430px] overflow-auto"
+        }`}
+      >
+        {text || "（空）"}
+      </pre>
+      {overflowing || open ? (
+        <div className="mt-2 flex items-center justify-end gap-3 text-[10px] text-ink-faint">
+          <button
+            type="button"
+            onClick={() => void navigator.clipboard.writeText(text)}
+            className="transition hover:text-coral"
+          >
+            复制
+          </button>
+          <button type="button" onClick={() => setOpen((value) => !value)} className="transition hover:text-coral">
+            {open ? "收起" : `展开全文（${text.length} 字）`}
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -252,7 +287,7 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
               <div className="mb-2 text-[9px] text-ink-faint">
                 {new Date(turn.at).toLocaleString("zh-CN")} · {turn.silent ? "这一轮没有开口" : `${turn.bubbles.length} 个气泡`}
               </div>
-              <Pre text={turnText} />
+              <Pre key={tab} text={turnText} />
             </>
           ) : (
             <p className="py-12 text-center text-[11px] text-ink-faint">还没有跑过一轮。去聊一句就有了。</p>
