@@ -315,6 +315,7 @@ export interface SettingsPayload {
 }
 
 export interface DebugPayload {
+  version: string;
   status: Status;
   life: Record<string, unknown>;
   own: Record<string, unknown>;

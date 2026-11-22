@@ -9,6 +9,7 @@ import {
   LoaderCircle,
   RefreshCw,
   Server,
+  Tag,
   Terminal,
   Wand2,
 } from "lucide-react";
@@ -185,19 +186,19 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
         <Card className="p-4">
           <div className="mb-2 inline-flex items-center gap-1.5 text-[9.5px] uppercase tracking-[0.16em] text-ink-faint">
-            <Cpu className="h-3 w-3" />
-            模型
+            <Tag className="h-3 w-3" />
+            版本
           </div>
-          <div className="font-mono text-[12px] text-ink">{data.config.model.model}</div>
-          <div className="mt-1 truncate text-[9.5px] text-ink-faint">{data.config.model.baseUrl}</div>
+          <div className="font-mono text-[12px] text-ink">v{data.version}</div>
+          <div className="mt-1 font-mono text-[9.5px] text-ink-faint">
+            {(() => {
+              const now = new Date(data.status.serverTime);
+              const week = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"][now.getDay()];
+              return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")} ${week}`;
+            })()}
+          </div>
           <div className="mt-2">
-            {data.config.model.apiKey ? (
-              <Badge tone="sea">
-                <CheckCircle2 className="h-2.5 w-2.5" /> 已配置 Key
-              </Badge>
-            ) : (
-              <Badge tone="coral">缺少 Key</Badge>
-            )}
+            <Badge tone="sea">今日运行</Badge>
           </div>
         </Card>
 
@@ -297,7 +298,10 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
         <div className="space-y-4">
           <Card className="p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
-              <div className="text-[10px] uppercase tracking-[0.16em] text-ink-faint">模型服务</div>
+              <div className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.16em] text-ink-faint">
+                <Cpu className="h-3 w-3" />
+                模型
+              </div>
               <span
                 className={`rounded-full px-1.5 py-0.5 font-mono text-[9px] ${
                   data.provider.state === "ok" ? "bg-sea/10 text-sea-deep" : "bg-coral/10 text-coral"
@@ -306,7 +310,18 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
                 {data.provider.state}
               </span>
             </div>
-            <div className="text-[11.5px] leading-5 text-ink">{data.provider.label}</div>
+            <div className="flex items-center justify-between gap-2">
+              <div className="truncate font-mono text-[12px] text-ink">{data.config.model.model}</div>
+              {data.config.model.apiKey ? (
+                <Badge tone="sea">
+                  <CheckCircle2 className="h-2.5 w-2.5" /> Key
+                </Badge>
+              ) : (
+                <Badge tone="coral">缺少 Key</Badge>
+              )}
+            </div>
+            <div className="mt-0.5 truncate font-mono text-[9px] text-ink-faint">{data.config.model.baseUrl}</div>
+            <div className="mt-2 text-[11.5px] leading-5 text-ink">{data.provider.label}</div>
             <div className="mt-0.5 text-[10px] text-ink-faint">{data.provider.detail}</div>
             <div className="mt-1.5 font-mono text-[9.5px] text-ink-faint">
               连续失败 {data.provider.consecutiveFailures} 次

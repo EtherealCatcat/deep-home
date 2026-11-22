@@ -143,10 +143,12 @@ function paramDay(params: unknown): string {
 
 // ---------- status & realtime ----------
 
+const APP_VERSION = "0.5.0";
+
 app.get("/api/health", async () => ({
   ok: true,
   name: config.name.trim() || "某鱼",
-  version: "0.5.0",
+  version: APP_VERSION,
   root,
   hasKey: Boolean(config.model.apiKey),
   time: Date.now(),
@@ -547,6 +549,7 @@ app.get("/api/own/log", async (request, reply) => {
 });
 
 app.get("/api/debug", async () => ({
+  version: APP_VERSION,
   status: currentStatus(),
   life: loadLife(p),
   own: loadOwn(p),
