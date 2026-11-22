@@ -92,6 +92,7 @@
   }
 }
 
+@layer components {
 /* ---------- surfaces ---------- */
 
 .paper-card {
@@ -302,7 +303,6 @@
 
 /* ---------- controls ---------- */
 
-@layer components {
 .input-warm {
   width: 100%;
   border-radius: 11px;
@@ -381,7 +381,6 @@
   border-color: rgba(207, 114, 87, 0.35);
   color: #b65c43;
 }
-}
 
 .nav-item {
   display: flex;
@@ -425,4 +424,5 @@
 .sticker-art {
   background: transparent;
   mix-blend-mode: multiply;
+}
 }
