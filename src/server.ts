@@ -22,7 +22,7 @@ import { appendChatMessage, planRetry, recentMessages, removeUserMessagesSince }
 import { addReminder, cancelReminder, loadReminders, markReminderDone, parseDue } from "./care.js";
 import { listDiaries, readDiary, yesterdayKey } from "./diaryStore.js";
 import { writeDiary, diaryTarget } from "./diary.js";
-import { consolidateMemory, hasInbox } from "./consolidate.js";
+import { consolidateMemory, hasInbox, readConsolidateState } from "./consolidate.js";
 import { appendTimeline, readTimeline, readTimelineForDisplay } from "./timeline.js";
 import { loadDeferred, loadLife } from "./life.js";
 import { todayUsage } from "./usage.js";
@@ -34,7 +34,7 @@ import { avatarFile, avatarInfo, clearAvatar, saveAvatar } from "./avatar.js";
 import { loadOwn, markOwnSeen, ownStateSnapshot, saveOwn } from "./own.js";
 import { readOwnLog } from "./web.js";
 import { isAllowedOrigin, isLoopbackOrigin, isRequestOriginAllowed } from "./security.js";
-import { backupFile, exists, readText, writeText } from "./store.js";
+import { backupFile, exists, listFiles, readText, writeText } from "./store.js";
 import { dayKey, formatClock, weekdayCN } from "./time.js";
 import type { ServerEvent } from "./events.js";
 
@@ -554,6 +554,11 @@ app.get("/api/debug", async () => ({
   life: loadLife(p),
   own: loadOwn(p),
   deferred: loadDeferred(p),
+  memory: {
+    inboxCount: listFiles(p.memoryInbox, ".md").length,
+    lastConsolidate: loadLife(p).lastConsolidate || null,
+    lastError: readConsolidateState(p),
+  },
   usage: todayUsage(p, config),
   timeline: readTimeline(p, dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone)).slice(-20),
   lastTurn: agent.getDebug(),
@@ -563,10 +568,12 @@ app.get("/api/debug", async () => ({
 }));
 
 app.post("/api/debug/consolidate", async () => {
+  if (agent.busy) return { ok: false, code: "busy", detail: "她正在说话，稍后再整理。" };
   const life = loadLife(p);
-  if (!life.lastDiary) return { ok: false, error: "还没有日记可整理。" };
-  const ok = await consolidateMemory(life.lastDiary, { config, paths: p, memory, emit, onChange });
-  return { ok };
+  if (!life.lastDiary) {
+    return { ok: false, code: "no-diary", detail: "还没有日记可整理。" };
+  }
+  return consolidateMemory(life.lastDiary, { config, paths: p, memory, emit, onChange });
 });
 
 // ---------- settings ----------

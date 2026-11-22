@@ -314,12 +314,37 @@ export interface SettingsPayload {
   modelOptions: { value: string; label: string }[];
 }
 
+export type ConsolidateCode =
+  | "ok"
+  | "no-inbox"
+  | "no-diary"
+  | "model-error"
+  | "parse-error"
+  | "busy";
+
+export interface ConsolidateOutcome {
+  ok: boolean;
+  code: ConsolidateCode;
+  detail?: string;
+}
+
+export interface ConsolidateFailureState {
+  at: number;
+  code: ConsolidateCode;
+  detail?: string;
+}
+
 export interface DebugPayload {
   version: string;
   status: Status;
   life: Record<string, unknown>;
   own: Record<string, unknown>;
   deferred: unknown[];
+  memory: {
+    inboxCount: number;
+    lastConsolidate: string | null;
+    lastError: ConsolidateFailureState | null;
+  };
   usage: UsageDay;
   timeline: TimelineEvent[];
   lastTurn: {

@@ -11,7 +11,7 @@ import { loadLife, saveLife } from "./life.js";
 import { bumpRelationship } from "./relationship.js";
 import { appendTimeline } from "./timeline.js";
 import { dayKey, weekdayCN } from "./time.js";
-import { listFiles, readText, ensureDir } from "./store.js";
+import { listFiles, readText, ensureDir, readJson, writeJson, removeFile } from "./store.js";
 import { readDiary } from "./diaryStore.js";
 
 export interface ConsolidateContext {
@@ -20,6 +20,20 @@ export interface ConsolidateContext {
   memory: MemoryStore;
   emit: (event: ServerEvent) => void;
   onChange: () => void;
+}
+
+export type ConsolidateCode = "ok" | "no-inbox" | "no-diary" | "model-error" | "parse-error" | "busy";
+
+export interface ConsolidateOutcome {
+  ok: boolean;
+  code: ConsolidateCode;
+  detail?: string;
+}
+
+export interface ConsolidateFailureState {
+  at: number;
+  code: ConsolidateCode;
+  detail?: string;
 }
 
 interface ConsolidateResult {
@@ -34,10 +48,75 @@ export function hasInbox(paths: Paths): boolean {
   return listFiles(paths.memoryInbox, ".md").length > 0;
 }
 
-export async function consolidateMemory(day: string, ctx: ConsolidateContext): Promise<boolean> {
+function consolidateStateFile(paths: Paths): string {
+  return path.join(paths.state, "consolidate.json");
+}
+
+export function readConsolidateState(paths: Paths): ConsolidateFailureState | null {
+  const raw = readJson<Partial<ConsolidateFailureState> | null>(consolidateStateFile(paths), null);
+  if (!raw || typeof raw.at !== "number" || typeof raw.code !== "string") return null;
+  return {
+    at: raw.at,
+    code: raw.code as ConsolidateCode,
+    detail: typeof raw.detail === "string" ? raw.detail : undefined,
+  };
+}
+
+function recordConsolidateFailure(
+  paths: Paths,
+  config: AppConfig,
+  code: ConsolidateCode,
+  detail?: string,
+): void {
+  const text = detail?.replace(/\s+/g, " ").trim().slice(0, 200);
+  writeJson(consolidateStateFile(paths), {
+    at: Date.now(),
+    code,
+    ...(text ? { detail: text } : {}),
+  });
+  appendTimeline(paths, config, {
+    kind: "error",
+    text: `记忆整理失败：${text || code}`,
+    meta: { code },
+  });
+}
+
+function clearConsolidateFailure(paths: Paths): void {
+  removeFile(consolidateStateFile(paths));
+}
+
+let active: Promise<ConsolidateOutcome> | null = null;
+
+export function isConsolidating(): boolean {
+  return active !== null;
+}
+
+export async function consolidateMemory(day: string, ctx: ConsolidateContext): Promise<ConsolidateOutcome> {
+  if (active) {
+    return { ok: false, code: "busy", detail: "上一次整理还没结束。" };
+  }
+  const task = runConsolidate(day, ctx);
+  active = task;
+  try {
+    return await task;
+  } finally {
+    if (active === task) active = null;
+  }
+}
+
+async function runConsolidate(day: string, ctx: ConsolidateContext): Promise<ConsolidateOutcome> {
   const { config, paths, memory, emit, onChange } = ctx;
   const inboxFiles = listFiles(paths.memoryInbox, ".md");
-  if (!inboxFiles.length) return false;
+  if (!inboxFiles.length) {
+    const life = loadLife(paths);
+    return {
+      ok: false,
+      code: "no-inbox",
+      detail: life.lastConsolidate
+        ? `队列里没有新的碎片；上次整理 ${life.lastConsolidate}`
+        : "队列里没有新的碎片；还没有整理过",
+    };
+  }
 
   const inbox = inboxFiles.map((file) => readText(file)).join("\n\n").slice(0, 5000);
   const core = memory.readCore();
@@ -92,7 +171,8 @@ export async function consolidateMemory(day: string, ctx: ConsolidateContext): P
     const parsed = parseJSON<ConsolidateResult>(result.content);
     if (!parsed) {
       emit({ type: "error", message: "记忆整理没成功，旧记忆先留着。" });
-      return false;
+      recordConsolidateFailure(paths, config, "parse-error", "模型返回的不是合法 JSON。");
+      return { ok: false, code: "parse-error", detail: "模型返回的不是合法 JSON。" };
     }
 
     const nextOwner = cleanMemory(parsed.owner, 3000);
@@ -125,12 +205,14 @@ export async function consolidateMemory(day: string, ctx: ConsolidateContext): P
     saveLife(paths, life);
     appendTimeline(paths, config, { kind: "memory", text: "整理了自己的记忆", meta: { day } });
     emit({ type: "timeline", event: { ts: Date.now(), kind: "memory", text: "整理了自己的记忆" } });
+    clearConsolidateFailure(paths);
     onChange();
-    return true;
+    return { ok: true, code: "ok" };
   } catch (error) {
     const message = error instanceof Error ? error.message : "记忆整理失败。";
     emit({ type: "error", message });
-    return false;
+    recordConsolidateFailure(paths, config, "model-error", message);
+    return { ok: false, code: "model-error", detail: message };
   }
 }
 

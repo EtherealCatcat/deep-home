@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  Archive,
   Braces,
   CheckCircle2,
   Clock,
@@ -127,7 +128,21 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
         showToast("记忆整理完成，旧版本已备份。");
         await load();
       } else {
-        showToast(result.error ?? "整理失败。", "error");
+        const lastConsolidate = data?.memory.lastConsolidate ?? "还没有";
+        const message =
+          result.code === "no-inbox"
+            ? `没有新的记忆碎片（最近一次整理：${lastConsolidate}）。她平时用 remember 记下的东西才会进这个队列。`
+            : result.code === "no-diary"
+              ? result.detail ?? "还没有日记可整理。"
+              : result.code === "model-error"
+                ? `模型调用失败：${result.detail ?? "未知原因"}`
+                : result.code === "parse-error"
+                  ? "模型回来的东西解析不出来，旧记忆先留着。"
+                  : result.code === "busy"
+                    ? result.detail ?? "她正在说话，稍后再整理。"
+                    : result.detail ?? "整理失败。";
+        showToast(message, result.code === "no-inbox" ? "info" : "error");
+        await load();
       }
     } catch (error) {
       showToast(error instanceof Error ? error.message : "整理失败。", "error");
@@ -175,7 +190,13 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
               {backfilling ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Clock className="h-3.5 w-3.5" />}
               补录记号
             </button>
-            <button type="button" onClick={() => void consolidate()} disabled={consolidating} className="btn-primary">
+            <button
+              type="button"
+              onClick={() => void consolidate()}
+              disabled={consolidating}
+              title={data?.memory.inboxCount === 0 ? "当前没有待整理的碎片" : undefined}
+              className="btn-primary"
+            >
               {consolidating ? <LoaderCircle className="h-3.5 w-3.5 animate-spin" /> : <Wand2 className="h-3.5 w-3.5" />}
               整理记忆
             </button>
@@ -342,6 +363,34 @@ export function DebugView({ showToast }: { showToast: (text: string, kind?: "inf
                 {data.provider.lastFailure.status ? ` · HTTP ${data.provider.lastFailure.status}` : ""}
               </div>
             ) : null}
+          </Card>
+          <Card className="p-4">
+            <div className="mb-2 flex items-center justify-between gap-2">
+              <div className="inline-flex items-center gap-1.5 text-[10px] uppercase tracking-[0.16em] text-ink-faint">
+                <Archive className="h-3 w-3" />
+                记忆整理
+              </div>
+              <span className="rounded-full bg-sea/10 px-1.5 py-0.5 font-mono text-[9px] text-sea-deep">
+                {data.memory.inboxCount} 个碎片
+              </span>
+            </div>
+            <div className="text-[11.5px] leading-5 text-ink">
+              上次整理 <span className="font-mono">{data.memory.lastConsolidate ?? "还没有"}</span>
+            </div>
+            {data.memory.lastError ? (
+              <>
+                <div className="mt-1 font-mono text-[9.5px] text-ink-faint">
+                  {new Date(data.memory.lastError.at).toLocaleString("zh-CN")} · {data.memory.lastError.code}
+                </div>
+                {data.memory.lastError.detail ? (
+                  <div className="mt-0.5 text-[10px] leading-4 text-ink-faint">
+                    {data.memory.lastError.detail}
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <p className="mt-1 text-[10px] text-ink-faint">最近没有整理失败。</p>
+            )}
           </Card>
           <Card className="p-4">
             <div className="mb-2 flex items-center justify-between gap-2">
