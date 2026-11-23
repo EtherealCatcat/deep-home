@@ -2,7 +2,7 @@ import path from "node:path";
 import type { AppConfig, TimelineEvent } from "./types.js";
 import type { Paths } from "./config.js";
 import { appendJsonl, listFiles, readJsonl } from "./store.js";
-import { dayKey, formatClock, weekdayCN } from "./time.js";
+import { addDays, dayKey, formatClock, weekdayCN } from "./time.js";
 
 export function timelineFile(p: Paths, day: string): string {
   return path.join(p.timeline, `${day}.jsonl`);
@@ -104,6 +104,38 @@ export function timelineSummary(
 
 export function timelineForPrompt(p: Paths, config: AppConfig, day: string): string {
   const events = readTimelineForDisplay(p, config, day);
+  if (!events.length) return "（今天还很安静。）";
+  return events
+    .slice(-24)
+    .map((event) => `${formatClock(event.ts, config.behavior.timezone)} ${event.text}`)
+    .join("\n");
+}
+
+/** 某段时间里的事件；跨旧逻辑日读取，再按 ts 过滤排序。 */
+export function readTimelineBetween(
+  p: Paths,
+  config: AppConfig,
+  startTs: number,
+  endTs: number,
+): TimelineEvent[] {
+  const first = dayKey(startTs, config.behavior.rotateHour, config.behavior.timezone);
+  const last = dayKey(endTs, config.behavior.rotateHour, config.behavior.timezone);
+  const events: TimelineEvent[] = [];
+  for (let day = first; day <= last; day = addDays(day, 1)) {
+    events.push(...readTimeline(p, day));
+  }
+  return events
+    .filter((event) => event.ts >= startTs && event.ts <= endTs)
+    .sort((a, b) => a.ts - b.ts);
+}
+
+export function timelineForPromptBetween(
+  p: Paths,
+  config: AppConfig,
+  startTs: number,
+  endTs: number,
+): string {
+  const events = groupTimelineEvents(readTimelineBetween(p, config, startTs, endTs), config);
   if (!events.length) return "（今天还很安静。）";
   return events
     .slice(-24)

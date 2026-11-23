@@ -70,8 +70,12 @@ export interface LifeConfig {
   diaryEnabled: boolean;
 }
 
+export type QuietMode = "sleep" | "manual";
+
 export interface SpeakConfig {
   enabled: boolean;
+  /** sleep：跟着作息安静；manual：用 quietStart/quietEnd 钟点。 */
+  quietMode: QuietMode;
   intervalMin: number;
   chance: number;
   minSilenceMin: number;
@@ -252,6 +256,12 @@ export interface LifeState {
   speakCountDay: string;
   speakCount: number;
   lastResumeGapAt: number;
+  /** 今天安排写日记的时刻；0 表示还没排。 */
+  diarySlotAt: number;
+  /** 排的是哪一天（醒来日）。 */
+  diarySlotDay: string;
+  /** 这个 slot 的有效期；过了就按补写处理。 */
+  diarySlotEndAt: number;
 }
 
 export interface DeferredTask {

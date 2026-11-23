@@ -18,8 +18,17 @@ describe("rhythm", () => {
     expect(rhythm.phase).toBe("awake");
   });
 
-  it("honours quiet hours", () => {
-    expect(isQuietHours(config, new Date("2026-11-18T23:30:00+08:00").getTime())).toBe(true);
+  it("keeps quiet from 30 minutes before sleep until waking", () => {
+    expect(isQuietHours(config, new Date("2026-11-19T00:10:00+08:00").getTime())).toBe(true);
     expect(isQuietHours(config, new Date("2026-11-18T12:00:00+08:00").getTime())).toBe(false);
+  });
+
+  it("honours manual quiet hours when configured", () => {
+    const manual = structuredClone(config);
+    manual.speak.quietMode = "manual";
+    manual.speak.quietStart = 23 * 60;
+    manual.speak.quietEnd = 8 * 60;
+    expect(isQuietHours(manual, new Date("2026-11-18T23:30:00+08:00").getTime())).toBe(true);
+    expect(isQuietHours(manual, new Date("2026-11-18T12:00:00+08:00").getTime())).toBe(false);
   });
 });

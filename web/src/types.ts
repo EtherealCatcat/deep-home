@@ -148,6 +148,7 @@ export interface Status {
     status: string;
     sleepAt: number;
     wakeAt: number;
+    awakeMs: number;
     nextChangeAt: number;
     woken: boolean;
     day: string;
@@ -295,6 +296,7 @@ export interface AppConfig {
     intervalMin: number;
     chance: number;
     minSilenceMin: number;
+    quietMode: "sleep" | "manual";
     quietStart: number;
     quietEnd: number;
     maxPerDay: number;
@@ -306,9 +308,19 @@ export interface AppConfig {
   ui: { port: number; notificationsEnabled: boolean };
 }
 
+export interface SchedulePreview {
+  wakeAt: number;
+  sleepAt: number;
+  awakeMin: number;
+  quietStartAt: number;
+  quietEndAt: number;
+  issues: { field: string; message: string }[];
+}
+
 export interface SettingsPayload {
   config: AppConfig;
   root: string;
+  schedulePreview: SchedulePreview;
   pricing: PeakInfo;
   prices: Record<string, ModelPrices>;
   modelOptions: { value: string; label: string }[];

@@ -20,6 +20,9 @@ export function defaultLifeState(): LifeState {
     speakCountDay: "",
     speakCount: 0,
     lastResumeGapAt: 0,
+    diarySlotAt: 0,
+    diarySlotDay: "",
+    diarySlotEndAt: 0,
   };
 }
 

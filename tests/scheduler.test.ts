@@ -68,10 +68,10 @@ describe("scheduler sharing queue", () => {
 
   it("does not flush while quiet", async () => {
     const { p, say, scheduler } = setup();
+    const quiet = new Date("2026-11-19T00:10:00+08:00").getTime();
     const state = defaultOwnTimeState();
-    queueShare(state, "现在还很安静", now);
+    queueShare(state, "现在还很安静", quiet - 5 * 60_000);
     saveOwn(p, state);
-    const quiet = new Date("2026-11-18T23:30:00+08:00").getTime();
 
     await (scheduler as unknown as { flushPendingShares: Flush }).flushPendingShares(quiet, { phase: "awake" });
 

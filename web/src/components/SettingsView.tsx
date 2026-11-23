@@ -26,6 +26,18 @@ import { initNotifications, setNotificationsEnabled } from "../notify";
 import type { AppConfig, SettingsPayload } from "../types";
 import { Badge, Card, Labeled, Loading, SectionTitle } from "./ui";
 
+function awakeMinutes(sleepMin: number, wakeMin: number): number {
+  return (sleepMin - wakeMin + 1440) % 1440;
+}
+
+function awakeLabel(minutes: number): string {
+  if (minutes === 0) return "24 小时（不合法）";
+  return `${Math.floor(minutes / 60)} 小时 ${minutes % 60} 分`;
+}
+
+const MIN_AWAKE = 360;
+const MAX_AWAKE = 1200;
+
 function Toggle({
   checked,
   onChange,
@@ -108,6 +120,7 @@ export function SettingsView({
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
+  const [scheduleError, setScheduleError] = useState<string | null>(null);
   const [dirty, setDirty] = useState(false);
   const [autostart, setAutostartState] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
@@ -239,6 +252,20 @@ export function SettingsView({
       showToast("先给她起个名字，再保存设置。", "error");
       return;
     }
+    const combos = [
+      { label: "工作日", minutes: awakeMinutes(next.life.sleepMin, next.life.wakeMin) },
+      { label: "周五夜", minutes: awakeMinutes(next.life.sleepMin, next.life.weekendWakeMin) },
+      { label: "周末", minutes: awakeMinutes(next.life.weekendSleepMin, next.life.weekendWakeMin) },
+      { label: "周日夜", minutes: awakeMinutes(next.life.weekendSleepMin, next.life.wakeMin) },
+    ];
+    const bad = combos.find((item) => item.minutes === 0 || item.minutes < MIN_AWAKE || item.minutes > MAX_AWAKE);
+    if (bad) {
+      const message = `「${bad.label}」清醒 ${awakeLabel(bad.minutes)}，需要在 6–20 小时之间。`;
+      setScheduleError(message);
+      showToast(message, "error");
+      return;
+    }
+    setScheduleError(null);
     setSaving(true);
     try {
       const result = await api.saveSettings(next);
@@ -250,7 +277,9 @@ export function SettingsView({
       showToast(result.note ?? "设置已保存，下一轮生效。");
       await load();
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "保存失败。", "error");
+      const message = error instanceof Error ? error.message : "保存失败。";
+      if (message.includes("作息")) setScheduleError(message);
+      showToast(message, "error");
     } finally {
       setSaving(false);
     }
@@ -517,6 +546,31 @@ export function SettingsView({
                 />
               </Labeled>
             </div>
+            <div className="mt-3 space-y-1.5 rounded-xl bg-ink/[0.03] px-3 py-2 text-[10px] text-ink-faint">
+              {(() => {
+                const combos = [
+                  { label: "工作日", minutes: awakeMinutes(config.life.sleepMin, config.life.wakeMin) },
+                  { label: "周五夜", minutes: awakeMinutes(config.life.sleepMin, config.life.weekendWakeMin) },
+                  { label: "周末", minutes: awakeMinutes(config.life.weekendSleepMin, config.life.weekendWakeMin) },
+                  { label: "周日夜", minutes: awakeMinutes(config.life.weekendSleepMin, config.life.wakeMin) },
+                ];
+                return combos.map((item) => {
+                  const invalid = item.minutes === 0 || item.minutes < MIN_AWAKE || item.minutes > MAX_AWAKE;
+                  return (
+                    <div key={item.label} className={invalid ? "text-[#b4553f]" : ""}>
+                      {item.label}清醒 {awakeLabel(item.minutes)}
+                      {invalid ? "（应在 6–20 小时）" : ""}
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+            {scheduleError ? (
+              <div className="mt-2 flex items-start gap-1.5 text-[10px] leading-4 text-[#b4553f]">
+                <AlertCircle className="mt-0.5 h-3 w-3 shrink-0" />
+                {scheduleError}
+              </div>
+            ) : null}
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <Labeled label="睡着时被找">
                 <select
@@ -584,23 +638,57 @@ export function SettingsView({
                 />
               </Labeled>
             </div>
-            <div className="grid gap-3 sm:grid-cols-3">
-              <Labeled label="安静开始">
-                <input
-                  type="time"
-                  value={minToClock(config.speak.quietStart)}
-                  onChange={(event) => patchSpeak({ quietStart: clockToMin(event.target.value) })}
-                  className="input-warm"
-                />
-              </Labeled>
-              <Labeled label="安静结束">
-                <input
-                  type="time"
-                  value={minToClock(config.speak.quietEnd)}
-                  onChange={(event) => patchSpeak({ quietEnd: clockToMin(event.target.value) })}
-                  className="input-warm"
-                />
-              </Labeled>
+            <div>
+              <div className="mb-1.5 text-[11px] font-medium text-ink-soft">安静时段</div>
+              <div className="inline-flex rounded-xl border border-line/60 p-0.5">
+                {([
+                  { value: "sleep", label: "跟随作息" },
+                  { value: "manual", label: "手动" },
+                ] as const).map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    onClick={() => patchSpeak({ quietMode: item.value })}
+                    className={`rounded-[10px] px-3 py-1.5 text-[11px] transition ${
+                      config.speak.quietMode === item.value
+                        ? "bg-sea text-white"
+                        : "text-ink-soft hover:bg-ink/5"
+                    }`}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              {config.speak.quietMode === "sleep" ? (
+                <div className="mt-2 text-[10px] leading-4 text-ink-faint">
+                  跟着作息走：睡前 30 分钟到第二天醒来，期间不主动说话。
+                  <span className="ml-1 text-ink-soft">
+                    安静 {minToClock((config.life.sleepMin - 30 + 1440) % 1440)} – 次日{" "}
+                    {minToClock(config.life.wakeMin)}
+                  </span>
+                </div>
+              ) : (
+                <div className="mt-2 grid gap-3 sm:grid-cols-2">
+                  <Labeled label="安静开始">
+                    <input
+                      type="time"
+                      value={minToClock(config.speak.quietStart)}
+                      onChange={(event) => patchSpeak({ quietStart: clockToMin(event.target.value) })}
+                      className="input-warm"
+                    />
+                  </Labeled>
+                  <Labeled label="安静结束">
+                    <input
+                      type="time"
+                      value={minToClock(config.speak.quietEnd)}
+                      onChange={(event) => patchSpeak({ quietEnd: clockToMin(event.target.value) })}
+                      className="input-warm"
+                    />
+                  </Labeled>
+                </div>
+              )}
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
               <Labeled label="最少沉默" hint="分钟">
                 <input
                   type="number"

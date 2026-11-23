@@ -13,26 +13,31 @@ import {
   planOwnWindow,
   queueShare,
   recentOwnResult,
-  scheduleOwnRetry,
+  rollbackOwnStart,
+  saveOwn,
   takeFreshShares,
 } from "../src/own.js";
+import { getSchedule } from "../src/schedule.js";
+import { defaultLifeState } from "../src/life.js";
 
 const config = structuredClone(DEFAULT_CONFIG);
 const now = new Date("2026-11-18T12:00:00+08:00").getTime();
 const rng = () => 0.9;
+const schedule = () => getSchedule(config, now, defaultLifeState());
 
 describe("own time windows", () => {
-  it("plans a slot inside a workday window", () => {
-    const plan = planOwnWindow(config, now, defaultOwnTimeState(), rng);
+  it("plans a slot inside the awake window", () => {
+    const plan = planOwnWindow(config, now, defaultOwnTimeState(), schedule(), rng);
     expect(plan).not.toBeNull();
     expect(plan!.nextAt).toBeGreaterThan(now);
     expect(plan!.windowEnd).toBeGreaterThan(plan!.nextAt);
-    expect(plan!.windowEnd).toBeLessThanOrEqual(new Date("2026-11-18T15:00:00+08:00").getTime());
+    const sleepAt = schedule().sleepAt;
+    expect(plan!.windowEnd).toBeLessThanOrEqual(sleepAt - 60 * 60_000);
   });
 
   it("keeps an existing future slot stable", () => {
-    const first = ensureOwnSchedule(config, now, defaultOwnTimeState(), rng);
-    const second = ensureOwnSchedule(config, now + 60_000, first, rng);
+    const first = ensureOwnSchedule(config, now, defaultOwnTimeState(), schedule(), rng);
+    const second = ensureOwnSchedule(config, now + 60_000, first, schedule(), rng);
     expect(second.nextAt).toBe(first.nextAt);
   });
 
@@ -100,21 +105,68 @@ describe("own time windows", () => {
     state.day = "2026-11-17";
     state.shareDay = "2026-11-18";
     state.shareCount = 1;
-    const next = ensureOwnSchedule(config, now, state);
+    const next = ensureOwnSchedule(config, now, state, schedule());
     expect(next.shareCount).toBe(1);
   });
 
-  it("gives back the quota on an infrastructure failure, once a day", () => {
+  it("plans a night-owl window inside the awake range", () => {
+    const night = structuredClone(config);
+    night.life.wakeMin = 20 * 60;
+    night.life.sleepMin = 8 * 60;
+    night.life.weekendWakeMin = 20 * 60;
+    night.life.weekendSleepMin = 8 * 60;
+    const at = new Date("2026-11-18T23:00:00+08:00").getTime();
+    const sched = getSchedule(night, at, defaultLifeState());
+    const plan = planOwnWindow(night, at, defaultOwnTimeState(), sched, rng);
+    expect(plan).not.toBeNull();
+    expect(plan!.nextAt).toBeGreaterThanOrEqual(sched.wakeAt + 30 * 60_000);
+    expect(plan!.windowEnd).toBeLessThanOrEqual(sched.sleepAt - 60 * 60_000);
+  });
+
+  it("does not plan a window while asleep", () => {
+    const sleeping = getSchedule(config, new Date("2026-11-18T02:00:00+08:00").getTime(), defaultLifeState());
+    expect(sleeping.phase).toBe("asleep");
+    expect(planOwnWindow(config, now, defaultOwnTimeState(), sleeping, rng)).toBeNull();
+  });
+
+  it("resets the day counters and plans again after waking", () => {
+    const state = defaultOwnTimeState();
+    state.day = "2026-11-17";
+    state.runsToday = 2;
+    state.nextAt = now - 60_000;
+    state.windowEnd = now - 30_000;
+    state.windowKey = "2026-11-17:700";
+    const next = ensureOwnSchedule(config, now, state, schedule(), rng);
+    expect(next.day).toBe("2026-11-18");
+    expect(next.runsToday).toBe(0);
+    expect(next.nextAt).toBeGreaterThan(now);
+  });
+
+  it("keeps a planned window that starts in the last sleepy hours", () => {
+    const state = defaultOwnTimeState();
+    state.day = schedule().day;
+    const sleepAt = schedule().sleepAt;
+    const start = sleepAt - 90 * 60_000;
+    state.nextAt = start;
+    state.windowEnd = start + 30 * 60_000;
+    state.windowKey = `${schedule().day}:${start}`;
+    state.runsToday = 1;
+    const next = ensureOwnSchedule(config, start + 5 * 60_000, state, schedule(), rng);
+    expect(next.nextAt).toBe(start);
+    expect(next.windowKey).toBe(state.windowKey);
+  });
+
+  it("rolls back an own-time start that never really ran", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "deephome-own-rollback-"));
+    const p = makePaths(root);
+    fs.mkdirSync(p.state, { recursive: true });
     const state = defaultOwnTimeState();
     state.runsToday = 1;
-    expect(scheduleOwnRetry(state, config, now)).toBe(true);
-    expect(state.runsToday).toBe(0);
-    expect(state.nextAt).toBe(now + 10 * 60_000);
-    expect(state.windowEnd).toBeGreaterThan(state.nextAt);
-    expect(state.retryDay).toBe("2026-11-18");
-
-    state.runsToday = 1;
-    expect(scheduleOwnRetry(state, config, now + 30 * 60_000)).toBe(false);
-    expect(state.runsToday).toBe(1);
+    state.activeUntil = now + 30 * 60_000;
+    saveOwn(p, state);
+    const rolled = rollbackOwnStart(p, "test");
+    expect(rolled.runsToday).toBe(0);
+    expect(rolled.activeUntil).toBe(0);
+    fs.rmSync(root, { recursive: true, force: true });
   });
 });

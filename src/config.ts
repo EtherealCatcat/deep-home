@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AppConfig } from "./types.js";
+import { clampLifeConfig } from "./schedule.js";
 
 export interface Paths {
   root: string;
@@ -119,6 +120,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   },
   speak: {
     enabled: true,
+    quietMode: "sleep",
     intervalMin: 45,
     chance: 0.3,
     minSilenceMin: 75,
@@ -179,7 +181,17 @@ export function loadConfig(p: Paths): AppConfig {
       raw = {};
     }
   }
-  const config = deepMerge(DEFAULT_CONFIG, raw);
+  let config = deepMerge(DEFAULT_CONFIG, raw);
+  const clamped = clampLifeConfig(config);
+  if (clamped.changed) {
+    config = clamped.config;
+    console.warn(
+      "[deephome] 作息时间超出 6–20 小时，已把醒点挪到最近的合法值：" +
+        clamped.config.life.wakeMin +
+        " / " +
+        clamped.config.life.weekendWakeMin,
+    );
+  }
   if (!config.model.apiKey) {
     config.model.apiKey =
       process.env.DEEPSEEK_API_KEY ??
@@ -188,12 +200,14 @@ export function loadConfig(p: Paths): AppConfig {
       process.env.CHATBRIDGE_API_KEY ??
       "";
   }
-  if (!fs.existsSync(p.config)) saveConfig(p, config);
+  if (!fs.existsSync(p.config) || clamped.changed) saveConfig(p, config);
   return config;
 }
 
 export function saveConfig(p: Paths, config: AppConfig): void {
-  fs.writeFileSync(p.config, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  const tmp = `${p.config}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", { mode: 0o600 });
+  fs.renameSync(tmp, p.config);
   try {
     fs.chmodSync(p.config, 0o600);
   } catch {

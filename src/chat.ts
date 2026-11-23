@@ -151,6 +151,41 @@ export function dayTranscriptForDiary(p: Paths, config: AppConfig, day: string, 
     .join("\n");
 }
 
+/**
+ * 某段时间里的消息。A 阶段不清洗旧 dayKey，聊天文件仍按逻辑日切分，
+ * 所以这里按区间覆盖到的旧逻辑日逐个读，再按 ts 精确过滤。
+ */
+export function messagesBetween(
+  p: Paths,
+  config: AppConfig,
+  startTs: number,
+  endTs: number,
+): ChatMessage[] {
+  const first = dayKey(startTs, config.behavior.rotateHour, config.behavior.timezone);
+  const last = dayKey(endTs, config.behavior.rotateHour, config.behavior.timezone);
+  const messages: ChatMessage[] = [];
+  for (let day = first; day <= last; day = addDays(day, 1)) {
+    messages.push(...readDayMessages(p, day));
+  }
+  return messages
+    .filter((message) => typeof message.ts === "number" && message.ts >= startTs && message.ts <= endTs)
+    .sort((a, b) => a.ts - b.ts);
+}
+
+export function dayTranscriptBetween(
+  p: Paths,
+  config: AppConfig,
+  startTs: number,
+  endTs: number,
+  limit = 120,
+): string {
+  const messages = messagesBetween(p, config, startTs, endTs).filter((m) => m.kind === "text");
+  return messages
+    .slice(-limit)
+    .map((m) => `[${formatClock(m.ts, config.behavior.timezone)}] ${m.role === "user" ? config.ownerTitle : config.name}：${m.text.replace(/\s+/g, " ")}`)
+    .join("\n");
+}
+
 export function todayRange(config: AppConfig): { start: number; end: number } {
   const key = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
   const start = dayStartTs(key, config.behavior.rotateHour, config.behavior.timezone);

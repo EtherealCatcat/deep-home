@@ -21,10 +21,11 @@ import {
 import { appendChatMessage, planRetry, recentMessages, removeUserMessagesSince } from "./chat.js";
 import { addReminder, cancelReminder, loadReminders, markReminderDone, parseDue } from "./care.js";
 import { listDiaries, readDiary, yesterdayKey } from "./diaryStore.js";
-import { writeDiary, diaryTarget } from "./diary.js";
+import { diarySlotSnapshot, diaryTarget, diaryTargetForDay, writeDiary } from "./diary.js";
+import { getSchedule, nextWakeAt, validateLifeConfig } from "./schedule.js";
 import { consolidateMemory, hasInbox, readConsolidateState } from "./consolidate.js";
 import { appendTimeline, readTimeline, readTimelineForDisplay } from "./timeline.js";
-import { loadDeferred, loadLife } from "./life.js";
+import { loadDeferred, loadLife, saveLife } from "./life.js";
 import { todayUsage } from "./usage.js";
 import { MODEL_PRICES, costPolicy, normalizePeakWindows, peakInfo } from "./pricing.js";
 import { SIDE_ATTEMPTS, SIDE_TIMEOUT_MS, callLLM, getLastLLMFailure, LLMError } from "./llm.js";
@@ -35,7 +36,7 @@ import { loadOwn, markOwnSeen, ownStateSnapshot, saveOwn } from "./own.js";
 import { readOwnLog } from "./web.js";
 import { isAllowedOrigin, isLoopbackOrigin, isRequestOriginAllowed } from "./security.js";
 import { backupFile, exists, listFiles, readText, writeText } from "./store.js";
-import { dayKey, formatClock, weekdayCN } from "./time.js";
+import { dayKey, formatClock, nextClockTs, weekdayCN } from "./time.js";
 import type { ServerEvent } from "./events.js";
 
 const root = dataRoot();
@@ -360,10 +361,10 @@ app.post("/api/command", async (request, reply) => {
     };
   }
   if (command === "/diary") {
-    const target = diaryTarget(config, loadLife(p).lastDiary, Date.now());
+    const target = diaryTarget(config, loadLife(p), Date.now());
     if (!target) return { ok: true, text: "今天还没到写日记的时候。" };
     const ok = await writeDiary(target, { config, paths: p, memory, persona, emit, onChange });
-    return { ok, text: ok ? `写好了 ${target} 的日记。` : "今天没有可写的，或者写失败了。" };
+    return { ok, text: ok ? `写好了 ${target.day} 的日记。` : "今天没有可写的，或者写失败了。" };
   }
   return reply.code(400).send({ error: "不认识这个命令。" });
 });
@@ -423,7 +424,7 @@ app.get("/api/diary/:day", async (request, reply) => {
 app.post("/api/diary/write", async (request) => {
   const body = requireObject(request.body);
   const day = String(body.day ?? "") || yesterdayKey(config);
-  const ok = await writeDiary(day, { config, paths: p, memory, persona, emit, onChange });
+  const ok = await writeDiary(diaryTargetForDay(config, day), { config, paths: p, memory, persona, emit, onChange });
   return { ok };
 });
 
@@ -548,24 +549,30 @@ app.get("/api/own/log", async (request, reply) => {
   return { day, content: readOwnLog(p, config, day) };
 });
 
-app.get("/api/debug", async () => ({
-  version: APP_VERSION,
-  status: currentStatus(),
-  life: loadLife(p),
-  own: loadOwn(p),
-  deferred: loadDeferred(p),
-  memory: {
-    inboxCount: listFiles(p.memoryInbox, ".md").length,
-    lastConsolidate: loadLife(p).lastConsolidate || null,
-    lastError: readConsolidateState(p),
-  },
-  usage: todayUsage(p, config),
-  timeline: readTimeline(p, dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone)).slice(-20),
-  lastTurn: agent.getDebug(),
-  lastLlmError: getLastLLMFailure(),
-  provider: providerSnapshot(),
-  config: maskConfig(config),
-}));
+app.get("/api/debug", async () => {
+  const life = loadLife(p);
+  const now = Date.now();
+  return {
+    version: APP_VERSION,
+    status: currentStatus(),
+    life,
+    own: loadOwn(p),
+    deferred: loadDeferred(p),
+    schedule: getSchedule(config, now, life),
+    diarySlot: diarySlotSnapshot(life),
+    memory: {
+      inboxCount: listFiles(p.memoryInbox, ".md").length,
+      lastConsolidate: life.lastConsolidate || null,
+      lastError: readConsolidateState(p),
+    },
+    usage: todayUsage(p, config),
+    timeline: readTimeline(p, dayKey(now, config.behavior.rotateHour, config.behavior.timezone)).slice(-20),
+    lastTurn: agent.getDebug(),
+    lastLlmError: getLastLLMFailure(),
+    provider: providerSnapshot(),
+    config: maskConfig(config),
+  };
+});
 
 app.post("/api/debug/consolidate", async () => {
   if (agent.busy) return { ok: false, code: "busy", detail: "她正在说话，稍后再整理。" };
@@ -608,16 +615,37 @@ app.post("/api/test-model", async (request) => {
   }
 });
 
-app.get("/api/settings", async () => ({
+app.get("/api/settings", async () => {
+  const life = loadLife(p);
+  const now = Date.now();
+  const schedule = getSchedule(config, now, life);
+  const quietStartAt =
+    config.speak.quietMode === "manual"
+      ? nextClockTs(now, config.speak.quietStart, config.behavior.timezone)
+      : schedule.sleepAt - 30 * 60_000;
+  const quietEndAt =
+    config.speak.quietMode === "manual"
+      ? nextClockTs(now, config.speak.quietEnd, config.behavior.timezone)
+      : nextWakeAt(config, schedule.sleepAt);
+  return {
   config: maskConfig(config),
   root,
+  schedulePreview: {
+    wakeAt: schedule.wakeAt,
+    sleepAt: schedule.sleepAt,
+    awakeMin: Math.round(schedule.awakeMs / 60_000),
+    quietStartAt,
+    quietEndAt,
+    issues: validateLifeConfig(config),
+  },
   pricing: peakInfo(config, Date.now()),
   prices: MODEL_PRICES,
   modelOptions: [
     { value: "deepseek-flash", label: "DeepSeek Flash（便宜、快）" },
     { value: "deepseek-v4-pro", label: "DeepSeek V4 Pro（更聪明、贵）" },
   ],
-}));
+  };
+});
 
 app.put("/api/settings", async (request, reply) => {
   const body = requireObject(request.body);
@@ -627,6 +655,12 @@ app.put("/api/settings", async (request, reply) => {
 
   const oldPort = config.ui.port;
   const next = deepMerge<AppConfig>(config, safe);
+  const issues = validateLifeConfig(next);
+  if (issues.length) {
+    return reply
+      .code(400)
+      .send({ error: "作息时间对不上：清醒时长需要在 6–20 小时之间。", field: issues[0].field, issues });
+  }
   const nextName = next.name.trim();
   if (!nextName) {
     return reply.code(400).send({ error: "先给她起个名字，再保存设置。" });
@@ -658,16 +692,27 @@ app.put("/api/settings", async (request, reply) => {
 
   // 关掉自己的时间、换时区或换逻辑日起点后，旧的补跑窗口已经没有意义了。
   // 预算/Key/模型变更不清：用户可能正是为了让补跑能跑才改的。
+  const scheduleChanged = (["sleepMin", "wakeMin", "weekendSleepMin", "weekendWakeMin"] as const).some(
+    (key) => config.life[key] !== next.life[key],
+  );
   const catchUpInvalid =
     (config.web.ownTimeEnabled && !next.web.ownTimeEnabled) ||
     config.behavior.timezone !== next.behavior.timezone ||
-    config.behavior.rotateHour !== next.behavior.rotateHour;
+    config.behavior.rotateHour !== next.behavior.rotateHour ||
+    scheduleChanged;
   if (catchUpInvalid) {
     const own = loadOwn(p);
     if (own.pendingCatchUp) {
       own.pendingCatchUp = null;
       saveOwn(p, own);
     }
+  }
+  if (scheduleChanged) {
+    const life = loadLife(p);
+    life.diarySlotAt = 0;
+    life.diarySlotDay = "";
+    life.diarySlotEndAt = 0;
+    saveLife(p, life);
   }
 
   saveConfig(p, next);

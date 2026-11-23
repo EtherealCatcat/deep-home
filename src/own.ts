@@ -1,22 +1,9 @@
 import type { AppConfig, OwnTimeState, PendingCatchUp, PendingShare } from "./types.js";
 import type { Paths } from "./config.js";
 import { readJson, writeJson } from "./store.js";
-import { addDays, dayKey, formatClock, zonedParts, zonedTimeToTs } from "./time.js";
-import { isRestDay } from "./holidays.js";
-import { isQuietHours } from "./rhythm.js";
+import { addDays, formatClock, zonedParts } from "./time.js";
+import { isQuietHours, scheduleDayKey, type Schedule } from "./schedule.js";
 import { isPeak } from "./pricing.js";
-
-const WORK_WINDOWS: [number, number][] = [
-  [12 * 60 + 10, 13 * 60 + 10],
-  [18 * 60 + 20, 20 * 60],
-  [20 * 60 + 40, 22 * 60],
-];
-
-const REST_WINDOWS: [number, number][] = [
-  [10 * 60 + 20, 12 * 60],
-  [15 * 60, 17 * 60],
-  [20 * 60 + 40, 22 * 60],
-];
 
 /** 补跑的年龄上限；超过就丢弃，避免房间/心情/记忆的“当前值”穿帮。 */
 export const CATCHUP_HORIZON_MS = 4 * 60 * 60_000;
@@ -26,6 +13,9 @@ export const CATCHUP_BACKOFF_MS = [30_000, 60_000, 120_000, 300_000];
 
 /** unknown 类失败最多再试 2 次，避免坏请求无限挂起。 */
 export const CATCHUP_MAX_UNKNOWN_ATTEMPTS = 2;
+
+export const OWN_MIN_DURATION_MIN = 20;
+export const OWN_MAX_DURATION_MIN = 60;
 
 export function catchUpBackoff(attempts: number): number {
   const index = Math.max(0, Math.min(CATCHUP_BACKOFF_MS.length - 1, attempts));
@@ -115,103 +105,143 @@ export function saveOwn(p: Paths, state: OwnTimeState): void {
   writeJson(ownFile(p), state);
 }
 
-function dayWindows(day: string): [number, number][] {
-  return isRestDay(day) ? REST_WINDOWS : WORK_WINDOWS;
-}
-
-function tsForMinute(day: string, minute: number, timezone: string): number {
-  const [year, month, date] = day.split("-").map(Number);
-  return zonedTimeToTs(year, month, date, Math.floor(minute / 60), minute % 60, timezone);
-}
-
 export interface OwnPlan {
   nextAt: number;
   windowEnd: number;
   key: string;
 }
 
+const SLOT_GRID_MS = 5 * 60_000;
+
+function randomDuration(rng: () => number): number {
+  return OWN_MIN_DURATION_MIN + Math.floor(rng() * (OWN_MAX_DURATION_MIN - OWN_MIN_DURATION_MIN + 1));
+}
+
+function startCandidates(from: number, lastStart: number): number[] {
+  const list: number[] = [];
+  for (let start = Math.ceil(from / SLOT_GRID_MS) * SLOT_GRID_MS; start <= lastStart; start += SLOT_GRID_MS) {
+    list.push(start);
+  }
+  return list;
+}
+
 /**
- * Pick the next 1–2 own-time slots. Each candidate is skipped with 30% chance,
- * so some days only get one slot and some get none.
+ * 在当天的清醒区间里排 1–2 段自己的时间。
+ * 第一段必排（可以在峰时跑一次，受预算约束）；第二段 50% 概率，且不再挑峰时。
  */
 export function planOwnWindow(
   config: AppConfig,
   now: number,
   state: OwnTimeState,
+  schedule: Schedule,
   rng: () => number = Math.random,
 ): OwnPlan | null {
-  const baseDay = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
-  for (let offset = 0; offset < 4; offset += 1) {
-    const day = addDays(baseDay, offset);
-    const runs = state.day === day ? state.runsToday : 0;
-    if (runs >= 2) continue;
-    for (const [startMin, endMin] of dayWindows(day)) {
-      const key = `${day}:${startMin}`;
-      if (key === state.lastWindowKey) continue;
-      const startTs = tsForMinute(day, startMin, config.behavior.timezone);
-      const endTs = tsForMinute(day, endMin, config.behavior.timezone);
-      if (endTs <= now + 60_000) continue;
-      if (rng() < 0.3) continue;
+  if (schedule.phase === "asleep") return null;
+  if (state.runsToday >= 2) return null;
 
-      const earliest = Math.max(startTs, now + 60_000);
-      const latest = endTs - 20 * 60_000;
-      if (latest < earliest) continue;
+  const earliestBase = Math.max(schedule.wakeAt + 30 * 60_000, now + 60_000);
+  const earliest = state.runsToday === 0 ? earliestBase : Math.max(earliestBase, (state.lastRunAt || 0) + 30 * 60_000);
+  const latestEnd = schedule.sleepAt - 60 * 60_000;
+  if (latestEnd <= earliest) return null;
 
-      const start = earliest + Math.floor(rng() * (latest - earliest));
-      const duration = 20 + Math.floor(rng() * 41);
-      return {
-        nextAt: start,
-        windowEnd: Math.min(endTs, start + duration * 60_000),
-        key,
-      };
-    }
+  const duration = randomDuration(rng);
+  const latestStart = latestEnd - duration * 60_000;
+  if (latestStart < earliest) return null;
+
+  // 第一段必排；第二段有一半概率跳过。
+  if (state.runsToday >= 1 && rng() > 0.5) return null;
+
+  const candidates = startCandidates(earliest, latestStart);
+  const offPeak = candidates.filter(
+    (start) => !isPeak(config, start) && !isPeak(config, start + duration * 60_000),
+  );
+  let chosen: number;
+  if (offPeak.length) {
+    chosen = offPeak[Math.floor(rng() * offPeak.length)];
+  } else if (state.runsToday === 0) {
+    // 实在没有非峰空隙，第一段允许在峰时跑一次（6.2B）。
+    chosen = candidates[Math.floor(rng() * candidates.length)] ?? earliest;
+  } else {
+    return null;
   }
-  return null;
+
+  return {
+    nextAt: chosen,
+    windowEnd: Math.min(schedule.sleepAt, chosen + duration * 60_000),
+    key: `${schedule.day}:${formatClock(chosen, config.behavior.timezone)}`,
+  };
 }
 
+function clearWindow(state: OwnTimeState): void {
+  state.nextAt = 0;
+  state.windowEnd = 0;
+  state.windowKey = "";
+}
+
+function resetDay(state: OwnTimeState, day: string): void {
+  state.day = day;
+  state.runsToday = 0;
+  state.nextAt = 0;
+  state.windowEnd = 0;
+  state.windowKey = "";
+  state.activeUntil = 0;
+  state.retryDay = "";
+  // 分享配额按 scheduleDay 单独重置：补发可能已经先把 shareDay 推到今天，
+  // 这里再清零会把刚记上的次数抹掉，导致早上多发一轮。
+  if (state.shareDay !== day) {
+    state.shareDay = day;
+    state.shareCount = 0;
+  }
+}
+
+/**
+ * 把状态推进到“现在该有的样子”：换日、清过期、必要时排下一段。
+ * 已排的窗口只要还在 [醒来, 睡前 1 小时) 且不撞安静时段就保留，不再因为峰时被清掉。
+ */
 export function ensureOwnSchedule(
   config: AppConfig,
   now: number,
   current: OwnTimeState,
+  schedule: Schedule,
   rng: () => number = Math.random,
 ): OwnTimeState {
   const state = current;
   if (!config.web.ownTimeEnabled) {
-    state.nextAt = 0;
-    state.windowEnd = 0;
+    clearWindow(state);
     state.activeUntil = 0;
+    state.updatedAt = now;
     return state;
   }
 
-  const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
-  if (state.day !== today) {
-    state.day = today;
-    state.runsToday = 0;
-    // 分享配额按 shareDay 单独重置：补发可能已经先把 shareDay 推到今天，
-    // 这里再清零会把刚记上的次数抹掉，导致早上多发一轮。
-    if (state.shareDay !== today) {
-      state.shareDay = today;
-      state.shareCount = 0;
-    }
-  }
-  if (state.activeUntil && state.activeUntil <= now) state.activeUntil = 0;
-  if (state.activeUntil > now) return state;
-  if (state.nextAt && state.windowEnd > now) {
-    const bad = isPeak(config, state.nextAt) || isQuietHours(config, state.nextAt);
-    if (!bad) return state;
-    state.nextAt = 0;
-    state.windowEnd = 0;
+  if (state.day !== schedule.day) resetDay(state, schedule.day);
+
+  if (schedule.phase === "asleep" || now < schedule.wakeAt || now >= schedule.sleepAt) {
+    if (state.activeUntil <= now) state.activeUntil = 0;
+    if (state.nextAt || state.windowEnd) clearWindow(state);
+    state.updatedAt = now;
+    return state;
   }
 
-  const plan = planOwnWindow(config, now, state, rng);
+  if (state.activeUntil > now) return state;
+
+  const latestNext = schedule.sleepAt - 60 * 60_000;
+  const planned = state.nextAt > 0 && state.windowEnd > now && state.nextAt >= schedule.wakeAt && state.nextAt <= latestNext;
+  if (planned && !isQuietHours(config, state.nextAt)) {
+    state.updatedAt = now;
+    return state;
+  }
+  clearWindow(state);
+
+  if (state.runsToday >= 2) {
+    state.updatedAt = now;
+    return state;
+  }
+
+  const plan = planOwnWindow(config, now, state, schedule, rng);
   if (plan) {
     state.nextAt = plan.nextAt;
     state.windowEnd = plan.windowEnd;
     state.windowKey = plan.key;
-  } else {
-    state.nextAt = now + 30 * 60_000;
-    state.windowEnd = state.nextAt;
-    state.windowKey = "retry";
   }
   state.updatedAt = now;
   return state;
@@ -236,21 +266,15 @@ export function markOwnEnd(state: OwnTimeState, now: number, result: string): vo
   state.updatedAt = now;
 }
 
-/**
- * 网络之类的基础设施故障不该算她今天已经出过门：退回这次配额，10 分钟后再试一次。
- * 每天只补一次，避免一整天反复重试烧额度。返回是否安排了补跑。
- * @deprecated v1 的离线补跑改用 pendingCatchUp，调度器不再调用它。
- */
-export function scheduleOwnRetry(state: OwnTimeState, config: AppConfig, now: number): boolean {
-  const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
-  if (state.retryDay === today) return false;
-  state.retryDay = today;
+/** 一次没能真正出门的尝试：把配额退回来，清掉 active 痕迹。 */
+export function rollbackOwnStart(p: Paths, reason: string): OwnTimeState {
+  const state = loadOwn(p);
+  state.activeUntil = 0;
   state.runsToday = Math.max(0, state.runsToday - 1);
-  state.nextAt = now + 10 * 60_000;
-  state.windowEnd = state.nextAt + 30 * 60_000;
-  state.windowKey = "retry";
-  state.updatedAt = now;
-  return true;
+  state.updatedAt = Date.now();
+  if (reason) console.warn(`[own] rollback: ${reason}`);
+  saveOwn(p, state);
+  return state;
 }
 
 export function ownLabel(state: OwnTimeState, now: number, timezone: string): string {
@@ -260,7 +284,7 @@ export function ownLabel(state: OwnTimeState, now: number, timezone: string): st
 }
 
 export function resetShareDay(state: OwnTimeState, config: AppConfig, now: number): void {
-  const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
+  const today = scheduleDayKey(config, now);
   if (state.shareDay !== today) {
     state.shareDay = today;
     state.shareCount = 0;
@@ -282,8 +306,8 @@ export function queueShare(state: OwnTimeState, text: string, ts: number = Date.
 }
 
 /**
- * 取出今天还能补发的排队分享。队列里的 ts 是“允许发送的时间”（静默结束的早上），
- * 所以跨过逻辑日边界也能发；不属于今天的一律丢掉，避免把几天前的话倒出来。
+ * 取出今天还能补发的排队分享。队列里的 ts 是“允许发送的时间”（安静结束的早上），
+ * 所以跨过旧逻辑日边界也能发；不属于今天的一律丢掉，避免把几天前的话倒出来。
  * 没有时间戳的旧记录（ts=0）同样丢掉。
  */
 export function takeFreshShares(
@@ -291,12 +315,10 @@ export function takeFreshShares(
   config: AppConfig,
   now: number,
 ): PendingShare[] {
-  const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
+  const today = scheduleDayKey(config, now);
   const all = state.pendingShares;
   state.pendingShares = [];
-  return all.filter(
-    (item) => item.ts > 0 && dayKey(item.ts, config.behavior.rotateHour, config.behavior.timezone) === today,
-  );
+  return all.filter((item) => item.ts > 0 && scheduleDayKey(config, item.ts) === today);
 }
 
 /** 最近一次自己时间的结果；太久了就不往聊天/状态里带，避免“刚才”永远是昨天。 */
@@ -390,8 +412,8 @@ export function nextOwnWindowLabel(config: AppConfig, now: number, state: OwnTim
   if (!config.web.ownTimeEnabled) return "自己的时间关着";
   if (state.activeUntil > now) return "正在过自己的时间";
   if (state.nextAt > now) {
-    const day = dayKey(state.nextAt, config.behavior.rotateHour, config.behavior.timezone);
-    const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
+    const day = scheduleDayKey(config, state.nextAt);
+    const today = scheduleDayKey(config, now);
     const prefix = day === today ? "今天" : day === addDays(today, 1) ? "明天" : day;
     return `${prefix} ${formatClock(state.nextAt, config.behavior.timezone)}`;
   }

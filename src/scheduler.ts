@@ -5,15 +5,16 @@ import type { ChatAgent } from "./agent.js";
 import type { ServerEvent } from "./events.js";
 import { addDeferred, loadDeferred, loadLife, saveDeferred, saveLife } from "./life.js";
 import { getRhythm, isQuietHours } from "./rhythm.js";
+import { getSchedule, quietEndsAt, scheduleDayKey } from "./schedule.js";
 import { costPolicy } from "./pricing.js";
 import { todayUsage } from "./usage.js";
 import { loadMood } from "./mood.js";
 import { loadRoom, roomAction, roomIsStale } from "./room.js";
 import { dueReminders, markReminderDone } from "./care.js";
-import { diaryTarget, writeDiary } from "./diary.js";
+import { diaryTarget, diaryTargetForDay, ensureDiarySlot, writeDiary } from "./diary.js";
 import { consolidateMemory, hasInbox } from "./consolidate.js";
 import { lastAssistantMessageAt, lastOwnerMessageAt, todayProactiveCount } from "./chat.js";
-import { dayKey, formatClock, humanGap, nextClockTs, zonedParts } from "./time.js";
+import { formatClock, humanGap, zonedParts } from "./time.js";
 import { appendTimeline } from "./timeline.js";
 import { addMilestone } from "./relationship.js";
 import {
@@ -42,6 +43,8 @@ import {
   providerRetryAt,
   providerSnapshot,
 } from "./provider.js";
+
+const DIARY_LATEST_BEFORE_SLEEP_MS = 15 * 60_000;
 
 export interface SchedulerContext {
   config: AppConfig;
@@ -110,6 +113,7 @@ export class Scheduler {
     saveLife(paths, life);
 
     const rhythm = getRhythm(config, life, now);
+    const schedule = getSchedule(config, now, life);
     const providerOk = providerAllowsNonEssential();
 
     // 供应商故障时不发提醒也不写日记：提醒留在队列里，等恢复后再补。
@@ -121,18 +125,26 @@ export class Scheduler {
     }
     await this.maybeCatchUp(now);
 
-    const pending = Boolean(loadOwn(paths).pendingCatchUp);
+    const pendingCatchUp = loadOwn(paths).pendingCatchUp;
+    const pending = Boolean(pendingCatchUp);
+    const pendingExpired = Boolean(pendingCatchUp && now - pendingCatchUp.nextRetryAt > 30 * 60_000);
     let policy = costPolicy(config, todayUsage(paths, config), now);
 
-    // 有待补跑的窗口时，先别写今天的日记/整理；补跑回来后那才是“今天”的完整记录。
-    if (!pending && providerOk) {
-      await this.processDeferred(now, policy, rhythm);
-
+    // 日记：睡前窗口自己排；有待补跑的窗口时，只有临近睡前/补跑明显卡住才照常写。
+    // 睡着后也可能是在补写昨晚的日记（睡后 6 小时内），所以 asleep 也算到期。
+    const diaryDue =
+      !pending ||
+      schedule.phase === "asleep" ||
+      now >= schedule.sleepAt - DIARY_LATEST_BEFORE_SLEEP_MS ||
+      pendingExpired;
+    if (providerOk && !agent.busy && diaryDue) {
       life = loadLife(paths);
-      const diaryDay = config.life.diaryEnabled ? diaryTarget(config, life.lastDiary, now) : null;
-      if (diaryDay && !agent.busy) {
-        if (policy.allowDiary) {
-          const ok = await writeDiary(diaryDay, {
+      ensureDiarySlot(paths, config, life, loadOwn(paths), schedule, now);
+      const target = diaryTarget(config, loadLife(paths), now);
+      if (target) {
+        // 峰时豁免日记（6.4A），只有预算真的用完才不写。
+        if (policy.budgetState !== "exhausted") {
+          await writeDiary(target, {
             config,
             paths,
             memory: this.ctx.memory,
@@ -140,13 +152,13 @@ export class Scheduler {
             emit,
             onChange,
           });
-          if (!ok) {
-            // No activity, or a transient failure: diaryTarget will retry later.
-          }
-        } else {
-          addDeferred(paths, { kind: "diary", runAfter: policy.nextChangeAt, payload: { day: diaryDay } });
         }
       }
+    }
+
+    // 有待补跑的窗口时，先别整理；补跑回来后那才是“今天”的完整记录。
+    if (!pending && providerOk) {
+      await this.processDeferred(now, policy, rhythm);
 
       life = loadLife(paths);
       if (
@@ -205,7 +217,7 @@ export class Scheduler {
         }
         const day = String(task.payload?.day ?? "");
         if (day) {
-          await writeDiary(day, {
+          await writeDiary(diaryTargetForDay(config, day), {
             config,
             paths,
             memory: this.ctx.memory,
@@ -237,14 +249,16 @@ export class Scheduler {
 
   private async maybeOwnTime(now: number, rhythm: ReturnType<typeof getRhythm>): Promise<void> {
     const { config, paths, agent } = this.ctx;
+    const schedule = getSchedule(config, now, loadLife(paths));
     if (agent.isHolding()) return;
     if (!config.web.ownTimeEnabled) {
-      saveOwn(paths, ensureOwnSchedule(config, now, loadOwn(paths)));
+      saveOwn(paths, ensureOwnSchedule(config, now, loadOwn(paths), schedule));
       return;
     }
-    if (rhythm.phase !== "awake" || isQuietHours(config, now)) return;
+    // 睡前 90 分钟仍可能有一段自己的时间（最晚到睡前 60 分钟），所以 sleepy 也放行。
+    if ((rhythm.phase !== "awake" && rhythm.phase !== "sleepy") || isQuietHours(config, now)) return;
 
-    let own = ensureOwnSchedule(config, now, loadOwn(paths));
+    let own = ensureOwnSchedule(config, now, loadOwn(paths), schedule);
     if (!own.nextAt || own.nextAt > now || own.windowEnd <= now) {
       saveOwn(paths, own);
       return;
@@ -262,7 +276,7 @@ export class Scheduler {
       own.nextAt = 0;
       own.windowEnd = 0;
       own.windowKey = "";
-      saveOwn(paths, ensureOwnSchedule(config, now, own));
+      saveOwn(paths, ensureOwnSchedule(config, now, own, schedule));
       this.ctx.onChange();
       return;
     }
@@ -274,14 +288,17 @@ export class Scheduler {
       own.nextAt = 0;
       own.windowEnd = 0;
       own.windowKey = "";
-      saveOwn(paths, ensureOwnSchedule(config, now, own));
+      saveOwn(paths, ensureOwnSchedule(config, now, own, schedule));
       this.ctx.onChange();
       return;
     }
 
     // 权限按实际时间算（可能在这次 tick 里刚花过钱），补跑也一样。
     const policy = costPolicy(config, todayUsage(paths, config), now);
-    if (!policy.allowOwnTime) {
+    // 6.2B：第一段自己的时间允许在峰时跑一次，前提是预算还没用完。
+    const firstWindow = own.runsToday === 0;
+    const peakException = firstWindow && policy.isPeak && policy.budgetState !== "exhausted";
+    if (!policy.allowOwnTime && !peakException) {
       saveOwn(paths, own);
       return;
     }
@@ -301,7 +318,7 @@ export class Scheduler {
       own.nextAt = 0;
       own.windowEnd = 0;
       own.windowKey = "";
-      saveOwn(paths, ensureOwnSchedule(config, now, own));
+      saveOwn(paths, ensureOwnSchedule(config, now, own, schedule));
       this.ctx.onChange();
       return;
     }
@@ -318,7 +335,7 @@ export class Scheduler {
     if (result.ok) {
       markOwnEnd(own, actualNow, result.summary);
       addMilestone(paths, config, "第一次自己出门");
-      own = ensureOwnSchedule(config, actualNow, own);
+      own = ensureOwnSchedule(config, actualNow, own, getSchedule(config, actualNow, loadLife(paths)));
 
       const remainingShares = Math.max(0, config.speak.tellOwnerMaxPerDay - own.shareCount);
       for (const share of result.shares.slice(0, remainingShares)) {
@@ -328,7 +345,7 @@ export class Scheduler {
           appendTimeline(paths, config, { kind: "share", text: `忍不住告诉他：${share.slice(0, 80)}` });
         } else if (isQuietHours(config, actualNow)) {
           // 静默期才排队；配额用完的话 tell_owner 已经跟她说清楚了，不悄悄攒着。
-          queueShare(own, share, nextClockTs(actualNow, config.speak.quietEnd, config.behavior.timezone));
+          queueShare(own, share, quietEndsAt(config, actualNow));
           appendTimeline(paths, config, { kind: "share", text: `想分享，先记着：${share.slice(0, 80)}` });
         }
       }
@@ -346,7 +363,7 @@ export class Scheduler {
     if (result.errorKind === "aborted") {
       // 她选择了和主人说话，这件事就过去了，不补。
       own.runsToday = Math.max(0, own.runsToday - 1);
-      saveOwn(paths, ensureOwnSchedule(config, actualNow, own));
+      saveOwn(paths, ensureOwnSchedule(config, actualNow, own, getSchedule(config, actualNow, loadLife(paths))));
       this.ctx.onChange();
       return;
     }
@@ -371,7 +388,7 @@ export class Scheduler {
         });
       }
       // 供应商故障不补跑：只排下一窗口，不 markOwnEnd、不 unread、不写「没去成」。
-      saveOwn(paths, ensureOwnSchedule(config, actualNow, own));
+      saveOwn(paths, ensureOwnSchedule(config, actualNow, own, getSchedule(config, actualNow, loadLife(paths))));
       this.ctx.onChange();
       return;
     }
@@ -384,7 +401,7 @@ export class Scheduler {
     } else if (result.error) {
       console.warn(`[own] ${result.errorKind ?? "unknown"}: ${result.error}`);
     }
-    saveOwn(paths, ensureOwnSchedule(config, actualNow, own));
+    saveOwn(paths, ensureOwnSchedule(config, actualNow, own, getSchedule(config, actualNow, loadLife(paths))));
     this.ctx.onChange();
   }
 
@@ -407,10 +424,8 @@ export class Scheduler {
     if (!pending) return;
     if (agent.busy || agent.isHolding()) return;
 
-    const rotate = config.behavior.rotateHour;
-    const tz = config.behavior.timezone;
-    const plannedDay = dayKey(pending.plannedAt, rotate, tz);
-    if (plannedDay !== dayKey(now, rotate, tz)) {
+    const plannedDay = scheduleDayKey(config, pending.plannedAt);
+    if (plannedDay !== scheduleDayKey(config, now)) {
       own.pendingCatchUp = null;
       saveOwn(paths, own);
       return;
@@ -478,7 +493,7 @@ export class Scheduler {
       if (latest.day === plannedDay) latest.runsToday += 1;
       markCatchUpDone(latest, pending, result.summary, actualNow);
       addMilestone(paths, config, "第一次自己出门");
-      saveOwn(paths, ensureOwnSchedule(config, actualNow, latest));
+      saveOwn(paths, ensureOwnSchedule(config, actualNow, latest, getSchedule(config, actualNow, loadLife(paths))));
       await this.deliverCatchUpShares(result.shares, pending.plannedAt);
       this.ctx.onChange();
       return;
@@ -628,7 +643,7 @@ export class Scheduler {
     if (silenceMs < config.speak.minSilenceMin * 60_000) return;
 
     const life = loadLife(paths);
-    const today = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
+    const today = scheduleDayKey(config, now);
     if (life.speakCountDay !== today) {
       life.speakCountDay = today;
       life.speakCount = 0;
