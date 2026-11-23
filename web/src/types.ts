@@ -312,9 +312,16 @@ export interface SchedulePreview {
   wakeAt: number;
   sleepAt: number;
   awakeMin: number;
+  phase: Phase;
+  nextChangeAt: number;
+  quietNow: boolean;
   quietStartAt: number;
   quietEndAt: number;
+  own: { nextAt: number; windowEnd: number; active: boolean };
+  diary: { targetDay: string | null; slotAt: number };
+  pendingCatchUp: boolean;
   issues: { field: string; message: string }[];
+  notice?: string;
 }
 
 export interface SettingsPayload {

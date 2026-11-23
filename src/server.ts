@@ -22,7 +22,7 @@ import { appendChatMessage, planRetry, recentMessages, removeUserMessagesSince }
 import { addReminder, cancelReminder, loadReminders, markReminderDone, parseDue } from "./care.js";
 import { listDiaries, readDiary, yesterdayKey } from "./diaryStore.js";
 import { diarySlotSnapshot, diaryTarget, diaryTargetForDay, writeDiary } from "./diary.js";
-import { getSchedule, nextWakeAt, validateLifeConfig } from "./schedule.js";
+import { getSchedule, isQuietHours, lastSleepAtBefore, nextWakeAt, validateLifeConfig } from "./schedule.js";
 import { consolidateMemory, hasInbox, readConsolidateState } from "./consolidate.js";
 import { appendTimeline, readTimeline, readTimelineForDisplay } from "./timeline.js";
 import { loadDeferred, loadLife, saveLife } from "./life.js";
@@ -32,7 +32,7 @@ import { SIDE_ATTEMPTS, SIDE_TIMEOUT_MS, callLLM, getLastLLMFailure, LLMError } 
 import { providerSnapshot, resetProviderHealth } from "./provider.js";
 import { findSticker, listStickers } from "./stickers.js";
 import { avatarFile, avatarInfo, clearAvatar, saveAvatar } from "./avatar.js";
-import { loadOwn, markOwnSeen, ownStateSnapshot, saveOwn } from "./own.js";
+import { loadOwn, markOwnSeen, ownStateSnapshot, reconcileOwnAfterScheduleChange, saveOwn } from "./own.js";
 import { readOwnLog } from "./web.js";
 import { isAllowedOrigin, isLoopbackOrigin, isRequestOriginAllowed } from "./security.js";
 import { backupFile, exists, listFiles, readText, writeText } from "./store.js";
@@ -619,14 +619,23 @@ app.get("/api/settings", async () => {
   const life = loadLife(p);
   const now = Date.now();
   const schedule = getSchedule(config, now, life);
-  const quietStartAt =
-    config.speak.quietMode === "manual"
-      ? nextClockTs(now, config.speak.quietStart, config.behavior.timezone)
-      : schedule.sleepAt - 30 * 60_000;
-  const quietEndAt =
-    config.speak.quietMode === "manual"
-      ? nextClockTs(now, config.speak.quietEnd, config.behavior.timezone)
-      : nextWakeAt(config, schedule.sleepAt);
+  const quietNow = isQuietHours(config, now);
+  const ownState = loadOwn(p);
+  const own = ownStateSnapshot(ownState, config, now);
+  const target = diaryTarget(config, life, now);
+  let quietStartAt: number;
+  let quietEndAt: number;
+  if (config.speak.quietMode === "manual") {
+    quietStartAt = nextClockTs(now, config.speak.quietStart, config.behavior.timezone);
+    quietEndAt = nextClockTs(now, config.speak.quietEnd, config.behavior.timezone);
+  } else if (schedule.phase === "asleep") {
+    // 睡着时 schedule.sleepAt 是“下一晚”，安静要从刚刚过去的睡点算。
+    quietStartAt = lastSleepAtBefore(config, schedule, now) - 30 * 60_000;
+    quietEndAt = schedule.wakeAt;
+  } else {
+    quietStartAt = schedule.sleepAt - 30 * 60_000;
+    quietEndAt = nextWakeAt(config, schedule.sleepAt);
+  }
   return {
   config: maskConfig(config),
   root,
@@ -634,9 +643,16 @@ app.get("/api/settings", async () => {
     wakeAt: schedule.wakeAt,
     sleepAt: schedule.sleepAt,
     awakeMin: Math.round(schedule.awakeMs / 60_000),
+    phase: schedule.phase,
+    nextChangeAt: schedule.nextChangeAt,
+    quietNow,
     quietStartAt,
     quietEndAt,
+    own: { nextAt: own.nextAt, windowEnd: own.windowEnd, active: own.active },
+    diary: { targetDay: life.diarySlotDay || (target ? target.day : null), slotAt: life.diarySlotAt },
+    pendingCatchUp: Boolean(ownState.pendingCatchUp),
     issues: validateLifeConfig(config),
+    notice: config.life.clampNotice,
   },
   pricing: peakInfo(config, Date.now()),
   prices: MODEL_PRICES,
@@ -695,6 +711,10 @@ app.put("/api/settings", async (request, reply) => {
   const scheduleChanged = (["sleepMin", "wakeMin", "weekendSleepMin", "weekendWakeMin"] as const).some(
     (key) => config.life[key] !== next.life[key],
   );
+  const scheduleRelevantChanged =
+    scheduleChanged ||
+    config.behavior.timezone !== next.behavior.timezone ||
+    config.behavior.rotateHour !== next.behavior.rotateHour;
   const catchUpInvalid =
     (config.web.ownTimeEnabled && !next.web.ownTimeEnabled) ||
     config.behavior.timezone !== next.behavior.timezone ||
@@ -707,19 +727,28 @@ app.put("/api/settings", async (request, reply) => {
       saveOwn(p, own);
     }
   }
-  if (scheduleChanged) {
+  const now = Date.now();
+  if (scheduleRelevantChanged || next.life.diaryEnabled === false) {
     const life = loadLife(p);
     life.diarySlotAt = 0;
     life.diarySlotDay = "";
     life.diarySlotEndAt = 0;
+    if (scheduleRelevantChanged) life.scheduleChangedAt = now;
     saveLife(p, life);
   }
 
+  // 保存成功即视为用户在设置页确认了被自动修正的提示。
+  next.life.clampNotice = undefined;
+  next.life.clampNoticeAt = undefined;
   saveConfig(p, next);
   config = next;
   memory.setConfig(config);
   resetProviderHealth();
   agent.clearLastChatError();
+  if (scheduleRelevantChanged) {
+    const schedule = getSchedule(config, now, loadLife(p));
+    reconcileOwnAfterScheduleChange(p, config, now, schedule);
+  }
   refreshContext();
   onChange();
   return { ok: true, config: maskConfig(config), note: next.ui.port !== oldPort ? "端口改动需要重启服务。" : undefined };

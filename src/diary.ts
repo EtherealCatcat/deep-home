@@ -11,7 +11,7 @@ import { pendingReminders, remindersText } from "./care.js";
 import { dayTranscriptBetween } from "./chat.js";
 import { appendTimeline, readTimelineBetween, timelineForPromptBetween } from "./timeline.js";
 import { addDays, formatClock, weekdayCN } from "./time.js";
-import { getSchedule, scheduleDayKey, scheduleDayRange, type Schedule } from "./schedule.js";
+import { getSchedule, lastSleepAtBefore, scheduleDayKey, scheduleDayRange, type Schedule } from "./schedule.js";
 import { runToolLoop } from "./agentLoop.js";
 import { saveDiary, readDiary } from "./diaryStore.js";
 
@@ -44,16 +44,6 @@ function clearSlot(life: LifeState): void {
   life.diarySlotEndAt = 0;
 }
 
-/** 最近一次已经睡下的时刻；跨周末时可能落在两天前。 */
-function lastSleepAtBefore(config: AppConfig, schedule: Schedule, now: number): number {
-  let latest = 0;
-  for (let offset = -2; offset <= 1; offset += 1) {
-    const sleepAt = scheduleDayRange(config, addDays(schedule.day, offset)).sleepAt;
-    if (sleepAt <= now && sleepAt > latest) latest = sleepAt;
-  }
-  return latest || schedule.sleepAt;
-}
-
 /**
  * 当前该写哪一天的日记。睡前窗口优先；错过就等醒来后 6 小时内补写。
  * 手动写的历史日记走 /api/diary/write 的另一条路径，不受这里限制。
@@ -76,6 +66,8 @@ export function diaryTarget(config: AppConfig, life: LifeState, now = Date.now()
 
   // 补写：最近一次睡下之后 6 小时内，且那一夜的日记还空着。
   const lastSleepAt = lastSleepAtBefore(config, schedule, now);
+  // 改作息前就已经过去的睡点不要用新作息重新解释，避免凭空补写一段没经历的日记。
+  if (life.scheduleChangedAt && lastSleepAt < life.scheduleChangedAt) return null;
   const lastSleepDay = scheduleDayKey(config, lastSleepAt - 60_000);
   if (now < lastSleepAt || now >= lastSleepAt + DIARY_BACKFILL_MS) return null;
   if (life.lastDiary === lastSleepDay) return null;

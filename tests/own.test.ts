@@ -12,6 +12,7 @@ import {
   markOwnStart,
   planOwnWindow,
   queueShare,
+  reconcileOwnAfterScheduleChange,
   recentOwnResult,
   rollbackOwnStart,
   saveOwn,
@@ -154,6 +155,40 @@ describe("own time windows", () => {
     const next = ensureOwnSchedule(config, start + 5 * 60_000, state, schedule(), rng);
     expect(next.nextAt).toBe(start);
     expect(next.windowKey).toBe(state.windowKey);
+  });
+
+  it("clears an old plan when the new schedule is already asleep", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "deephome-own-reconcile-"));
+    const p = makePaths(root);
+    fs.mkdirSync(p.state, { recursive: true });
+    const night = new Date("2026-11-19T02:00:00+08:00").getTime();
+    const asleep = getSchedule(config, night, defaultLifeState());
+    const state = defaultOwnTimeState();
+    state.day = asleep.day;
+    state.runsToday = 1;
+    state.nextAt = night + 60 * 60_000;
+    state.windowEnd = state.nextAt + 30 * 60_000;
+    state.windowKey = "old";
+    saveOwn(p, state);
+
+    const next = reconcileOwnAfterScheduleChange(p, config, night, asleep);
+    expect(next.nextAt).toBe(0);
+    expect(next.runsToday).toBe(1);
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps an in-flight own window but adopts the new schedule afterwards", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "deephome-own-reconcile-"));
+    const p = makePaths(root);
+    fs.mkdirSync(p.state, { recursive: true });
+    const state = defaultOwnTimeState();
+    const activeUntil = now + 20 * 60_000;
+    state.activeUntil = activeUntil;
+    saveOwn(p, state);
+    const next = reconcileOwnAfterScheduleChange(p, config, now, schedule());
+    expect(next.activeUntil).toBe(activeUntil);
+    expect(next.updatedAt).toBe(now);
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   it("rolls back an own-time start that never really ran", () => {

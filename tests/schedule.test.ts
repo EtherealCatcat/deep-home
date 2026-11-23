@@ -4,6 +4,7 @@ import {
   MIN_AWAKE_MINUTES,
   clampLifeConfig,
   getSchedule,
+  lifeCombos,
   isQuietHours,
   nextWakeAt,
   quietEndsAt,
@@ -64,6 +65,16 @@ describe("schedule", () => {
     expect(validateLifeConfig(bad).length).toBeGreaterThan(0);
   });
 
+  it("normalizes out-of-range minutes before clamping the wake time", () => {
+    const bad = structuredClone(config);
+    bad.life.sleepMin = 1500;
+    bad.life.wakeMin = 480;
+    const { changed, config: fixed } = clampLifeConfig(bad);
+    expect(changed).toBe(true);
+    expect(fixed.life.sleepMin).toBe(60);
+    expect(validateLifeConfig(fixed)).toHaveLength(0);
+  });
+
   it("clamps only the wake time, keeping the sleep anchor", () => {
     const bad = structuredClone(config);
     bad.life.sleepMin = 60;
@@ -73,6 +84,25 @@ describe("schedule", () => {
     expect(fixed.life.sleepMin).toBe(60);
     expect(fixed.life.wakeMin).toBe(330);
     expect(validateLifeConfig(fixed)).toHaveLength(0);
+  });
+
+  it("labels the four awake windows with their real sleep/wake fields", () => {
+    const life = structuredClone(config.life);
+    life.sleepMin = 30;
+    life.wakeMin = 480;
+    life.weekendSleepMin = 120;
+    life.weekendWakeMin = 720;
+    const combos = lifeCombos(life);
+    expect(combos.map((item) => item.label)).toEqual(["工作日（周一到周四）", "周五", "周六", "周日"]);
+    expect(combos[1].awakeMin).toBe(18 * 60);
+    expect(combos[3].awakeMin).toBe(12.5 * 60);
+  });
+
+  it("reports the sleep field when a sleep time is out of range", () => {
+    const bad = structuredClone(config);
+    bad.life.weekendSleepMin = 1500;
+    const issues = validateLifeConfig(bad);
+    expect(issues[0].field).toBe("weekendSleepMin");
   });
 
   it("uses the sleep-based quiet window by default", () => {

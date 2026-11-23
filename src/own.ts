@@ -247,6 +247,30 @@ export function ensureOwnSchedule(
   return state;
 }
 
+/**
+ * 保存新作息后立即把 own 状态收敛到新时间轴：
+ * 正在进行的这段不打断；没在进行的，清掉旧计划并按新作息重排。
+ * 配额（runsToday/shareCount）不重置，跨醒来日才由 resetDay 处理。
+ */
+export function reconcileOwnAfterScheduleChange(
+  p: Paths,
+  config: AppConfig,
+  now: number,
+  schedule: Schedule,
+): OwnTimeState {
+  const state = loadOwn(p);
+  if (state.activeUntil > now) {
+    state.updatedAt = now;
+    saveOwn(p, state);
+    return state;
+  }
+  clearWindow(state);
+  state.updatedAt = now;
+  const next = ensureOwnSchedule(config, now, state, schedule);
+  saveOwn(p, next);
+  return next;
+}
+
 export function markOwnStart(state: OwnTimeState, now: number, windowEnd: number): void {
   state.activeUntil = windowEnd;
   state.runsToday += 1;

@@ -1,4 +1,4 @@
-import type { AppConfig, LifeState } from "./types.js";
+import type { AppConfig, LifeConfig, LifeState } from "./types.js";
 import { addDays, minutesOfDay, nextClockTs, zonedParts, zonedTimeToTs } from "./time.js";
 import { dayTypeLabel, isRestDay } from "./holidays.js";
 
@@ -159,6 +159,16 @@ export function scheduleDayKey(config: AppConfig, ts = Date.now()): string {
   return getSchedule(config, ts).day;
 }
 
+/** 最近一次已经睡下的时刻；跨周末时可能落在两天前。 */
+export function lastSleepAtBefore(config: AppConfig, schedule: Schedule, now: number): number {
+  let latest = 0;
+  for (let offset = -2; offset <= 1; offset += 1) {
+    const sleepAt = scheduleDayRange(config, addDays(schedule.day, offset)).sleepAt;
+    if (sleepAt <= now && sleepAt > latest) latest = sleepAt;
+  }
+  return latest || schedule.sleepAt;
+}
+
 /** after 之后的下一次醒来时刻。 */
 export function nextWakeAt(config: AppConfig, after = Date.now()): number {
   const tz = config.behavior.timezone;
@@ -190,20 +200,42 @@ function awakeIssue(label: string, sleepMin: number, wakeMin: number): ScheduleI
   return null;
 }
 
+// 标签表示「哪一天醒来；这一段到第二天凌晨的睡点」。睡点看次日是否休息。
 const COMBOS: { label: string; sleep: "sleepMin" | "weekendSleepMin"; wake: "wakeMin" | "weekendWakeMin" }[] = [
-  { label: "工作日", sleep: "sleepMin", wake: "wakeMin" },
-  { label: "周五晚到周六", sleep: "sleepMin", wake: "weekendWakeMin" },
-  { label: "周六晚到周日", sleep: "weekendSleepMin", wake: "weekendWakeMin" },
-  { label: "周日晚到周一", sleep: "weekendSleepMin", wake: "wakeMin" },
+  { label: "工作日（周一到周四）", sleep: "sleepMin", wake: "wakeMin" },
+  { label: "周五", sleep: "weekendSleepMin", wake: "wakeMin" },
+  { label: "周六", sleep: "weekendSleepMin", wake: "weekendWakeMin" },
+  { label: "周日", sleep: "sleepMin", wake: "weekendWakeMin" },
 ];
+
+export interface LifeCombo {
+  label: string;
+  sleepMin: number;
+  wakeMin: number;
+  awakeMin: number;
+}
+
+/** 四个「醒来日 → 睡前」组合，标签与睡/醒字段一一对应；设置页与校验共用同一套定义。 */
+export function lifeCombos(life: LifeConfig): LifeCombo[] {
+  return COMBOS.map((combo) => ({
+    label: combo.label,
+    sleepMin: life[combo.sleep],
+    wakeMin: life[combo.wake],
+    awakeMin: awakeMinutes(life[combo.sleep], life[combo.wake]),
+  }));
+}
 
 export function validateLifeConfig(config: AppConfig): ScheduleIssue[] {
   const issues: ScheduleIssue[] = [];
   for (const combo of COMBOS) {
     const sleep = Number(config.life[combo.sleep]);
     const wake = Number(config.life[combo.wake]);
-    if (!Number.isFinite(sleep) || !Number.isFinite(wake) || sleep < 0 || sleep > 1439 || wake < 0 || wake > 1439) {
-      issues.push({ field: combo.wake, message: `${combo.label}的作息时间不在 0:00–23:59 之间。` });
+    if (!Number.isFinite(sleep) || sleep < 0 || sleep > 1439) {
+      issues.push({ field: combo.sleep, message: `${combo.label}的睡点不在 0:00–23:59 之间。` });
+      continue;
+    }
+    if (!Number.isFinite(wake) || wake < 0 || wake > 1439) {
+      issues.push({ field: combo.wake, message: `${combo.label}的醒点不在 0:00–23:59 之间。` });
       continue;
     }
     const issue = awakeIssue(combo.label, sleep, wake);
@@ -245,9 +277,32 @@ function nearestValidWake(current: number, sleeps: number[]): number {
  * 保留睡点，只把醒点挪到最近的合法值。只动确实越界的那一组醒点，
  * 未受影响的作息原样保留。
  */
+const LIFE_KEYS = ["sleepMin", "wakeMin", "weekendSleepMin", "weekendWakeMin"] as const;
+// 与 DEFAULT_CONFIG.life 保持一致；用于非数字兜底，避免把 NaN 带进运行态。
+const LIFE_FALLBACK: Record<(typeof LIFE_KEYS)[number], number> = {
+  sleepMin: 30,
+  wakeMin: 480,
+  weekendSleepMin: 90,
+  weekendWakeMin: 570,
+};
+
+function normalizeMinutes(value: unknown, fallback: number): number {
+  if (value === null || value === undefined || value === "") return fallback;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return ((Math.round(n) % 1440) + 1440) % 1440;
+}
+
 export function clampLifeConfig(config: AppConfig): { changed: boolean; config: AppConfig } {
   const next = structuredClone(config);
   let changed = false;
+  for (const key of LIFE_KEYS) {
+    const normalized = normalizeMinutes(next.life[key], LIFE_FALLBACK[key]);
+    if (normalized !== next.life[key]) {
+      next.life[key] = normalized;
+      changed = true;
+    }
+  }
   const wakeFields: { field: "wakeMin" | "weekendWakeMin"; sleeps: ("sleepMin" | "weekendSleepMin")[] }[] = [
     { field: "wakeMin", sleeps: ["sleepMin", "weekendSleepMin"] },
     { field: "weekendWakeMin", sleeps: ["sleepMin", "weekendSleepMin"] },

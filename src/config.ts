@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AppConfig } from "./types.js";
-import { clampLifeConfig } from "./schedule.js";
+import { clampLifeConfig, validateLifeConfig } from "./schedule.js";
 
 export interface Paths {
   root: string;
@@ -183,13 +183,27 @@ export function loadConfig(p: Paths): AppConfig {
   }
   let config = deepMerge(DEFAULT_CONFIG, raw);
   const clamped = clampLifeConfig(config);
-  if (clamped.changed) {
-    config = clamped.config;
+  config = clamped.config;
+  let changed = clamped.changed;
+  const remaining = validateLifeConfig(config);
+  if (remaining.length) {
+    config.life = structuredClone(DEFAULT_CONFIG.life);
+    changed = true;
+    config.life.clampNotice = "旧作息时间无法修正，已回退到默认作息。";
+    config.life.clampNoticeAt = Date.now();
+    console.warn("[deephome] 作息时间无法修正，已回退到默认作息。");
+  } else if (changed) {
+    config.life.clampNotice = "旧作息时间不合法，已自动修正到最近的可用值。";
+    config.life.clampNoticeAt = Date.now();
     console.warn(
-      "[deephome] 作息时间超出 6–20 小时，已把醒点挪到最近的合法值：" +
-        clamped.config.life.wakeMin +
+      "[deephome] 作息时间不合法，已自动修正：" +
+        config.life.sleepMin +
         " / " +
-        clamped.config.life.weekendWakeMin,
+        config.life.wakeMin +
+        " / " +
+        config.life.weekendSleepMin +
+        " / " +
+        config.life.weekendWakeMin,
     );
   }
   if (!config.model.apiKey) {
@@ -200,7 +214,7 @@ export function loadConfig(p: Paths): AppConfig {
       process.env.CHATBRIDGE_API_KEY ??
       "";
   }
-  if (!fs.existsSync(p.config) || clamped.changed) saveConfig(p, config);
+  if (!fs.existsSync(p.config) || changed) saveConfig(p, config);
   return config;
 }
 

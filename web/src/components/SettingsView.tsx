@@ -23,7 +23,7 @@ import {
 import { api, assetUrl, clockToMin, formatTime, minToClock } from "../api";
 import { getAutostart, setAutostart } from "../autostart";
 import { initNotifications, setNotificationsEnabled } from "../notify";
-import type { AppConfig, SettingsPayload } from "../types";
+import type { AppConfig, Phase, SettingsPayload } from "../types";
 import { Badge, Card, Labeled, Loading, SectionTitle } from "./ui";
 
 function awakeMinutes(sleepMin: number, wakeMin: number): number {
@@ -37,6 +37,19 @@ function awakeLabel(minutes: number): string {
 
 const MIN_AWAKE = 360;
 const MAX_AWAKE = 1200;
+
+function scheduleCombos(life: AppConfig["life"]): { label: string; minutes: number }[] {
+  return [
+    { label: "工作日", minutes: awakeMinutes(life.sleepMin, life.wakeMin) },
+    { label: "周五", minutes: awakeMinutes(life.weekendSleepMin, life.wakeMin) },
+    { label: "周六", minutes: awakeMinutes(life.weekendSleepMin, life.weekendWakeMin) },
+    { label: "周日", minutes: awakeMinutes(life.sleepMin, life.weekendWakeMin) },
+  ];
+}
+
+function phaseLabel(phase: Phase): string {
+  return phase === "asleep" ? "睡着" : phase === "waking" ? "刚醒" : phase === "sleepy" ? "有点困" : "醒着";
+}
 
 function Toggle({
   checked,
@@ -121,6 +134,7 @@ export function SettingsView({
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [scheduleError, setScheduleError] = useState<string | null>(null);
+  const [savedAt, setSavedAt] = useState(0);
   const [dirty, setDirty] = useState(false);
   const [autostart, setAutostartState] = useState(false);
   const [autostartBusy, setAutostartBusy] = useState(false);
@@ -252,12 +266,7 @@ export function SettingsView({
       showToast("先给她起个名字，再保存设置。", "error");
       return;
     }
-    const combos = [
-      { label: "工作日", minutes: awakeMinutes(next.life.sleepMin, next.life.wakeMin) },
-      { label: "周五夜", minutes: awakeMinutes(next.life.sleepMin, next.life.weekendWakeMin) },
-      { label: "周末", minutes: awakeMinutes(next.life.weekendSleepMin, next.life.weekendWakeMin) },
-      { label: "周日夜", minutes: awakeMinutes(next.life.weekendSleepMin, next.life.wakeMin) },
-    ];
+    const combos = scheduleCombos(next.life);
     const bad = combos.find((item) => item.minutes === 0 || item.minutes < MIN_AWAKE || item.minutes > MAX_AWAKE);
     if (bad) {
       const message = `「${bad.label}」清醒 ${awakeLabel(bad.minutes)}，需要在 6–20 小时之间。`;
@@ -269,13 +278,20 @@ export function SettingsView({
     setSaving(true);
     try {
       const result = await api.saveSettings(next);
-      setPayload((old) => (old ? { ...old, config: result.config } : old));
-      setConfig(result.config);
+      const fresh = await api.settings();
+      setPayload(fresh);
+      setConfig(fresh.config);
       setApiKey("");
       setDirty(false);
       setTestResult(null);
-      showToast(result.note ?? "设置已保存，下一轮生效。");
-      await load();
+      setSavedAt(Date.now());
+      const phase = fresh.schedulePreview.phase;
+      showToast(
+        result.note ??
+          (phase === "asleep"
+            ? "已保存。按新作息，她现在在睡；醒来后的安排已重排。"
+            : "已保存。新的醒睡时间已生效；正在进行的自己的时间会先收尾。"),
+      );
     } catch (error) {
       const message = error instanceof Error ? error.message : "保存失败。";
       if (message.includes("作息")) setScheduleError(message);
@@ -548,13 +564,7 @@ export function SettingsView({
             </div>
             <div className="mt-3 space-y-1.5 rounded-xl bg-ink/[0.03] px-3 py-2 text-[10px] text-ink-faint">
               {(() => {
-                const combos = [
-                  { label: "工作日", minutes: awakeMinutes(config.life.sleepMin, config.life.wakeMin) },
-                  { label: "周五夜", minutes: awakeMinutes(config.life.sleepMin, config.life.weekendWakeMin) },
-                  { label: "周末", minutes: awakeMinutes(config.life.weekendSleepMin, config.life.weekendWakeMin) },
-                  { label: "周日夜", minutes: awakeMinutes(config.life.weekendSleepMin, config.life.wakeMin) },
-                ];
-                return combos.map((item) => {
+                return scheduleCombos(config.life).map((item) => {
                   const invalid = item.minutes === 0 || item.minutes < MIN_AWAKE || item.minutes > MAX_AWAKE;
                   return (
                     <div key={item.label} className={invalid ? "text-[#b4553f]" : ""}>
@@ -571,6 +581,36 @@ export function SettingsView({
                 {scheduleError}
               </div>
             ) : null}
+            {(() => {
+              const preview = payload.schedulePreview;
+              return (
+                <div className="mt-3 space-y-1 rounded-xl border border-line/70 bg-paper/60 px-3 py-2 text-[10px] leading-4 text-ink-soft">
+                  <div>
+                    现在：{phaseLabel(preview.phase)} · 下一次切换 {formatTime(preview.nextChangeAt)}
+                  </div>
+                  <div>
+                    {preview.own.active
+                      ? `正在自己的时间，约 ${formatTime(preview.own.windowEnd)} 收尾`
+                      : preview.own.nextAt
+                        ? `下一次自己的时间 ${formatTime(preview.own.nextAt)}–${formatTime(preview.own.windowEnd)}`
+                        : "自己的时间：今天不再另排"}
+                  </div>
+                  <div>
+                    {preview.diary.slotAt
+                      ? `日记：${preview.diary.targetDay ?? "今天"} 睡前（约 ${formatTime(preview.diary.slotAt)}）`
+                      : "日记：今天还没排"}
+                  </div>
+                  <div>
+                    {preview.quietNow
+                      ? `安静：现在安静中，到 ${formatTime(preview.quietEndAt)}`
+                      : `安静：${formatTime(preview.quietStartAt)}–${formatTime(preview.quietEndAt)}`}
+                  </div>
+                  {preview.pendingCatchUp ? <div>待补跑：还有一次落下的自己的时间</div> : null}
+                  {preview.notice ? <div className="text-[#8a6d3b]">{preview.notice}</div> : null}
+                  {savedAt ? <div className="text-ink-faint">保存于 {formatTime(savedAt)}</div> : null}
+                </div>
+              );
+            })()}
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
               <Labeled label="睡着时被找">
                 <select

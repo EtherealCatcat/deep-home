@@ -68,6 +68,9 @@ export interface LifeConfig {
   weekendWakeMin: number;
   whenAsleep: "wake" | "sleepy" | "morning";
   diaryEnabled: boolean;
+  /** 旧配置被自动修正时留下的提示，保存一次设置后清空。 */
+  clampNotice?: string;
+  clampNoticeAt?: number;
 }
 
 export type QuietMode = "sleep" | "manual";
@@ -262,6 +265,8 @@ export interface LifeState {
   diarySlotDay: string;
   /** 这个 slot 的有效期；过了就按补写处理。 */
   diarySlotEndAt: number;
+  /** 最近一次作息变更的时刻；用来避免给改作息前的旧睡点补写日记。 */
+  scheduleChangedAt?: number;
 }
 
 export interface DeferredTask {

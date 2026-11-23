@@ -58,6 +58,13 @@ describe("diary schedule", () => {
     expect(target?.phase).toBe("backfill");
   });
 
+  it("does not backfill a sleep that happened before the schedule change", () => {
+    const now = ts("2026-11-19T02:00:00+08:00");
+    const changed = { ...life, lastDiary: "", scheduleChangedAt: ts("2026-11-19T01:30:00+08:00") };
+    expect(diaryTarget(config, changed, now)).toBeNull();
+    expect(diaryTarget(config, { ...life, lastDiary: "" }, now)?.day).toBe("2026-11-18");
+  });
+
   it("stops backfilling six hours after sleep", () => {
     const now = ts("2026-11-19T07:00:00+08:00");
     expect(diaryTarget(config, { ...life, lastDiary: "" }, now)).toBeNull();
