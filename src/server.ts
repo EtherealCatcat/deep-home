@@ -153,7 +153,7 @@ function paramDay(params: unknown): string {
 
 // ---------- status & realtime ----------
 
-const APP_VERSION = "0.5.1";
+const APP_VERSION = "0.6.0";
 
 app.get("/api/health", async () => ({
   ok: true,
