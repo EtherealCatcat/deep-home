@@ -1,7 +1,7 @@
 import type { AppConfig, MoodState } from "./types.js";
 import type { Paths } from "./config.js";
 import { readJson, writeJson } from "./store.js";
-import { dayKey } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 
 export const MOOD_DIMS = [
   "happy",
@@ -159,7 +159,7 @@ export function moodDeltaFromJson(raw: unknown): MoodChange | null {
 }
 
 export function isPeakMoodDay(config: AppConfig): string {
-  return dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  return logicalDayKey(config, Date.now());
 }
 
 function clamp(value: number, min: number, max: number): number {

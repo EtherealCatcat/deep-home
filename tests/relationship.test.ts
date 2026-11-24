@@ -4,7 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import { DEFAULT_CONFIG, ensureLayout, paths } from "../src/config.js";
 import type { Paths } from "../src/config.js";
-import { dayKey } from "../src/time.js";
+import { dayKey, zonedTimeToTs } from "../src/time.js";
+import { logicalDayKey } from "../src/schedule.js";
 import {
   addMilestone,
   backfillMilestones,
@@ -34,7 +35,13 @@ function today(offset = 0): string {
 }
 
 function writeChat(p: Paths, day: string, text = "在"): void {
-  fs.writeFileSync(path.join(p.chat, `${day}.jsonl`), `${JSON.stringify({ role: "user", text })}\n`);
+  const [year, month, date] = day.split("-").map(Number);
+  const ts = zonedTimeToTs(year, month, date, 12, 0, config.behavior.timezone);
+  const file = path.join(p.chat, `${logicalDayKey(config, ts)}.jsonl`);
+  fs.writeFileSync(
+    file,
+    `${JSON.stringify({ id: `m-${day}`, role: "user", text, ts, dayKey: logicalDayKey(config, ts) })}\n`,
+  );
 }
 
 function texts(p: Paths): string[] {

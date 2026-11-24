@@ -19,7 +19,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "build:p5": "npm run build:web && node scripts/prepare-p5.mjs",
-    "tauri:build:p5": "tauri build --bundles app,dmg"
+    "tauri:build:p5": "tauri build --bundles app,dmg",
+    "migrate:days": "tsx scripts/migrate-logical-days.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.4.3",

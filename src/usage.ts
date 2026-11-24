@@ -1,6 +1,7 @@
 import type { AppConfig, UsageDay } from "./types.js";
 import type { Paths } from "./config.js";
-import { addDays, dayKey } from "./time.js";
+import { addDays } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 import { estimateCost } from "./pricing.js";
 import { readJson, writeJson } from "./store.js";
 
@@ -26,7 +27,7 @@ function loadMap(p: Paths): UsageMap {
   return readJson<UsageMap>(p.state + "/usage.json", {});
 }
 
-export function usageForDay(p: Paths, config: AppConfig, day = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone)): UsageDay {
+export function usageForDay(p: Paths, config: AppConfig, day = logicalDayKey(config, Date.now())): UsageDay {
   const map = loadMap(p);
   return map[day] ?? emptyDay(day);
 }
@@ -45,7 +46,7 @@ export interface RecordUsageInput {
 
 export function recordUsage(p: Paths, config: AppConfig, input: RecordUsageInput): UsageDay {
   const at = input.at ?? Date.now();
-  const day = dayKey(at, config.behavior.rotateHour, config.behavior.timezone);
+  const day = logicalDayKey(config, at);
   const map = loadMap(p);
   const entry = map[day] ?? emptyDay(day);
   const estimate = estimateCost(
@@ -83,7 +84,7 @@ export function recordUsage(p: Paths, config: AppConfig, input: RecordUsageInput
 
 export function usageSnapshot(p: Paths, config: AppConfig): UsageDay[] {
   const map = loadMap(p);
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const today = logicalDayKey(config, Date.now());
   const days: UsageDay[] = [];
   for (let i = 6; i >= 0; i--) {
     const key = addDays(today, -i);

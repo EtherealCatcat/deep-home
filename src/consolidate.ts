@@ -10,7 +10,8 @@ import { recordUsage } from "./usage.js";
 import { loadLife, saveLife } from "./life.js";
 import { bumpRelationship } from "./relationship.js";
 import { appendTimeline } from "./timeline.js";
-import { dayKey, weekdayCN } from "./time.js";
+import { weekdayCN } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 import { listFiles, readText, ensureDir, readJson, writeJson, removeFile } from "./store.js";
 import { readDiary } from "./diaryStore.js";
 
@@ -250,5 +251,5 @@ export function dayAfter(day: string): string {
 }
 
 export function todayKey(config: AppConfig): string {
-  return dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  return logicalDayKey(config, Date.now());
 }

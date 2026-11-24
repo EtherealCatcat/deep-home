@@ -2,7 +2,8 @@ import path from "node:path";
 import type { AppConfig, TimelineEvent } from "./types.js";
 import type { Paths } from "./config.js";
 import { appendJsonl, listFiles, readJsonl } from "./store.js";
-import { addDays, dayKey, formatClock, weekdayCN } from "./time.js";
+import { formatClock, weekdayCN } from "./time.js";
+import { candidateDayKeys, logicalDayKey, logicalDayRange } from "./schedule.js";
 
 export function timelineFile(p: Paths, day: string): string {
   return path.join(p.timeline, `${day}.jsonl`);
@@ -10,7 +11,7 @@ export function timelineFile(p: Paths, day: string): string {
 
 export function appendTimeline(p: Paths, config: AppConfig, event: Omit<TimelineEvent, "ts"> & { ts?: number }): void {
   const ts = event.ts ?? Date.now();
-  appendJsonl(timelineFile(p, dayKey(ts, config.behavior.rotateHour, config.behavior.timezone)), {
+  appendJsonl(timelineFile(p, logicalDayKey(config, ts)), {
     ...event,
     ts,
   });
@@ -64,7 +65,8 @@ export function groupTimelineEvents(events: TimelineEvent[], config: AppConfig):
 }
 
 export function readTimelineForDisplay(p: Paths, config: AppConfig, day: string): TimelineEvent[] {
-  return groupTimelineEvents(readTimeline(p, day), config);
+  const range = logicalDayRange(config, day);
+  return groupTimelineEvents(readTimelineBetween(p, config, range.start, range.end), config);
 }
 
 const LABELS: Record<string, string> = {
@@ -118,15 +120,18 @@ export function readTimelineBetween(
   startTs: number,
   endTs: number,
 ): TimelineEvent[] {
-  const first = dayKey(startTs, config.behavior.rotateHour, config.behavior.timezone);
-  const last = dayKey(endTs, config.behavior.rotateHour, config.behavior.timezone);
+  const seen = new Set<string>();
   const events: TimelineEvent[] = [];
-  for (let day = first; day <= last; day = addDays(day, 1)) {
-    events.push(...readTimeline(p, day));
+  for (const day of candidateDayKeys(config, startTs, endTs)) {
+    for (const event of readTimeline(p, day)) {
+      if (event.ts < startTs || event.ts > endTs) continue;
+      const key = `${event.ts}:${event.kind}:${event.text}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      events.push(event);
+    }
   }
-  return events
-    .filter((event) => event.ts >= startTs && event.ts <= endTs)
-    .sort((a, b) => a.ts - b.ts);
+  return events.sort((a, b) => a.ts - b.ts);
 }
 
 export function timelineForPromptBetween(

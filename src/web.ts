@@ -7,7 +7,8 @@ import Parser from "rss-parser";
 import type { AppConfig } from "./types.js";
 import type { Paths } from "./config.js";
 import { appendText, ensureDir, readText, writeText } from "./store.js";
-import { dayKey, formatClock } from "./time.js";
+import { formatClock } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 
 const MAX_BYTES = 2_500_000;
 const MAX_CHARS = 7000;
@@ -253,7 +254,7 @@ export function readNotes(p: Paths): string {
 }
 
 export function ownLogFile(p: Paths, config: AppConfig, ts = Date.now()): string {
-  return path.join(p.web, "own", `${dayKey(ts, config.behavior.rotateHour, config.behavior.timezone)}.md`);
+  return path.join(p.web, "own", `${logicalDayKey(config, ts)}.md`);
 }
 
 export function appendOwnLog(p: Paths, config: AppConfig, text: string, ts = Date.now()): void {

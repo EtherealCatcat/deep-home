@@ -2,7 +2,8 @@ import path from "node:path";
 import type { AppConfig } from "./types.js";
 import type { Paths } from "./config.js";
 import { backupFile, ensureDir, listFiles, readText, writeText } from "./store.js";
-import { dayKey } from "./time.js";
+import { addDays } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 
 export function diaryFile(p: Paths, day: string): string {
   return path.join(p.diary, `${day}.md`);
@@ -33,5 +34,5 @@ export function listDiaries(p: Paths, limit = 60): { day: string; title: string;
 }
 
 export function yesterdayKey(config: AppConfig, now = Date.now()): string {
-  return dayKey(now - 86_400_000, config.behavior.rotateHour, config.behavior.timezone);
+  return addDays(logicalDayKey(config, now), -1);
 }
