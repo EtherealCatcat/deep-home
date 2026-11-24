@@ -1,5 +1,6 @@
 import type { AppConfig, MoodState, Relationship, Reminder, RoomState, SceneKind, Sticker } from "./types.js";
 import { dayKey, formatDateTime, humanGap, periodLabel, weekdayCN, zonedParts } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 
 export const DEFAULT_PERSONA = `# {name}
 
@@ -176,11 +177,7 @@ export function dimLabel(key: string): string {
 }
 
 export function daysSince(dateKey: string, config?: AppConfig): number {
-  const todayKey = dayKey(
-    Date.now(),
-    config?.behavior.rotateHour ?? 5,
-    config?.behavior.timezone ?? "Asia/Shanghai",
-  );
+  const todayKey = config ? logicalDayKey(config, Date.now()) : dayKey(Date.now(), 0, "Asia/Shanghai");
   const start = Date.parse(`${dateKey}T00:00:00Z`);
   const today = Date.parse(`${todayKey}T00:00:00Z`);
   if (!Number.isFinite(start) || !Number.isFinite(today)) return 1;

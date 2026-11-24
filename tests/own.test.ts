@@ -75,7 +75,7 @@ describe("own time windows", () => {
   it("drops shares that waited more than a day", () => {
     const state = defaultOwnTimeState();
     queueShare(state, "昨天的旧话", now - 25 * 60 * 60_000);
-    queueShare(state, "今早的话", now - 6 * 60 * 60_000);
+    queueShare(state, "今早的话", now - 2 * 60 * 60_000);
     const fresh = takeFreshShares(state, config, now);
     expect(fresh.map((item) => item.text)).toEqual(["今早的话"]);
     expect(state.pendingShares).toHaveLength(0);

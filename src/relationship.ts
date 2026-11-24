@@ -2,8 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import type { AppConfig, Relationship } from "./types.js";
 import type { Paths } from "./config.js";
-import { readJson, writeJson, listFiles } from "./store.js";
-import { dayKey, addDays, formatClock } from "./time.js";
+import { readJson, readJsonl, writeJson, listFiles } from "./store.js";
+import { addDays, formatClock } from "./time.js";
+import { logicalDayKey, logicalDayRange } from "./schedule.js";
+import { messagesBetween } from "./chat.js";
+import type { ChatMessage } from "./types.js";
 import { daysSince } from "./persona.js";
 
 /** 信任/亲密涨到这些档位时自动记一笔，文案里带数字，按 text 去重。 */
@@ -12,7 +15,7 @@ const MILESTONE_STEPS = [60, 80, 90];
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 export function defaultRelationship(config: AppConfig): Relationship {
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const today = logicalDayKey(config, Date.now());
   return {
     firstMet: today,
     daysKnown: 1,
@@ -27,7 +30,7 @@ export function defaultRelationship(config: AppConfig): Relationship {
 
 export function loadRelationship(p: Paths, config: AppConfig): Relationship {
   const state = readJson<Relationship>(p.state + "/relationship.json", defaultRelationship(config));
-  if (!state.firstMet) state.firstMet = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  if (!state.firstMet) state.firstMet = logicalDayKey(config, Date.now());
   state.daysKnown = daysSince(state.firstMet, config);
   if (!Array.isArray(state.milestones)) state.milestones = [];
   return state;
@@ -55,7 +58,7 @@ export function bumpRelationship(p: Paths, config: AppConfig, bump: Relationship
     intimacy: clamp(state.intimacy + (bump.intimacy ?? 0), 0, 100),
     updatedAt: Date.now(),
   };
-  const date = bump.date ?? dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const date = bump.date ?? logicalDayKey(config, Date.now());
   if (bump.milestone) pushMilestone(next, bump.milestone, date);
   for (const step of MILESTONE_STEPS) {
     if (state.trust < step && next.trust >= step) pushMilestone(next, `信任到了 ${step}`, date);
@@ -78,7 +81,7 @@ export function addMilestone(p: Paths, config: AppConfig, text: string, date?: s
 export function recordFirstChat(p: Paths, config: AppConfig): Relationship {
   const state = loadRelationship(p, config);
   const earliest =
-    earliestChatDay(p) ?? dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+    earliestChatDay(p, config) ?? logicalDayKey(config, Date.now());
   const changed = setMilestoneDate(state, "第一次说话", earliest) || state.firstMet !== earliest;
   state.firstMet = earliest;
   if (!changed) return state;
@@ -102,7 +105,7 @@ export function backfillMilestones(p: Paths, config: AppConfig): BackfillResult 
   const before = state.milestones.length;
   let dirty = false;
 
-  const chatDay = earliestChatDay(p);
+  const chatDay = earliestChatDay(p, config);
   if (chatDay) {
     if (state.firstMet !== chatDay) {
       state.firstMet = chatDay;
@@ -131,13 +134,13 @@ export function backfillMilestones(p: Paths, config: AppConfig): BackfillResult 
 
 export function updateStreak(p: Paths, config: AppConfig): Relationship {
   const state = loadRelationship(p, config);
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const today = logicalDayKey(config, Date.now());
   // 连续说话天数：从今天往回数，日子连续且当天有聊天记录。
-  let streak = 0;
   let cursor = today;
+  let streak = 0;
   for (let i = 0; i < 365; i++) {
-    const file = `${p.chat}/${cursor}.jsonl`;
-    const has = safeHasMessages(file);
+    const range = logicalDayRange(config, cursor);
+    const has = messagesBetween(p, config, range.start, range.end).length > 0;
     if (has) {
       streak += 1;
       cursor = addDays(cursor, -1);
@@ -180,13 +183,16 @@ function setMilestoneDate(state: Relationship, text: string, date: string): bool
   return true;
 }
 
-/** 最早一个有内容的聊天日；目录里可能混着别的文件，只认 YYYY-MM-DD.jsonl。 */
-function earliestChatDay(p: Paths): string | null {
+/** 最早一个有内容的聊天日；按消息时间换算成当前的逻辑日。 */
+function earliestChatDay(p: Paths, config: AppConfig): string | null {
+  let earliest: number | null = null;
   for (const file of listFiles(p.chat, ".jsonl")) {
-    const day = dayOfFile(file, ".jsonl");
-    if (day && safeHasMessages(file)) return day;
+    for (const message of readJsonl<ChatMessage>(file)) {
+      if (typeof message.ts !== "number") continue;
+      if (earliest === null || message.ts < earliest) earliest = message.ts;
+    }
   }
-  return null;
+  return earliest === null ? null : logicalDayKey(config, earliest);
 }
 
 /** 某个目录里最早一个有内容的日期文件（日记/整理结果/自己出门的日志）。 */

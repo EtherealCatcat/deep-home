@@ -2,7 +2,8 @@ import path from "node:path";
 import type { AppConfig, ChatMessage, LLMMessage, QuoteRef } from "./types.js";
 import type { Paths } from "./config.js";
 import { appendJsonl, atomicWrite, exists, listFiles, readJsonl, readText, removeFile, writeJson } from "./store.js";
-import { addDays, dayKey, dayStartTs, formatClock } from "./time.js";
+import { addDays, formatClock } from "./time.js";
+import { candidateDayKeys, legacyDayKey, logicalDayKey, logicalDayRange } from "./schedule.js";
 
 let counter = 0;
 
@@ -25,7 +26,7 @@ export function appendChatMessage(
     ...input,
     id: newId(input.role),
     ts,
-    dayKey: dayKey(ts, config.behavior.rotateHour, config.behavior.timezone),
+    dayKey: logicalDayKey(config, ts),
   };
   appendJsonl(chatFile(p, message.dayKey), message);
   return message;
@@ -40,11 +41,11 @@ export function readDayMessages(p: Paths, day: string): ChatMessage[] {
  * 只扫该时刻所在逻辑日及之后的文件；返回删掉的条数。
  */
 export function removeUserMessagesSince(p: Paths, config: AppConfig, since: number): number {
-  const fromDay = dayKey(since, config.behavior.rotateHour, config.behavior.timezone);
+  const candidates = new Set(candidateDayKeys(config, since, Date.now()));
   let removed = 0;
   for (const file of listFiles(p.chat, ".jsonl")) {
     const day = path.basename(file, ".jsonl");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day < fromDay) continue;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !candidates.has(day)) continue;
     const messages = readJsonl<ChatMessage>(file);
     const kept = messages.filter(
       (message) => !(message.role === "user" && typeof message.ts === "number" && message.ts >= since),
@@ -61,10 +62,9 @@ export function removeUserMessagesSince(p: Paths, config: AppConfig, since: numb
 }
 
 export function recentMessages(p: Paths, config: AppConfig, limit = 40): ChatMessage[] {
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
-  const days = [addDays(today, -2), addDays(today, -1), today];
-  const messages = days.flatMap((day) => readDayMessages(p, day));
-  return messages.slice(-limit);
+  const today = logicalDayKey(config, Date.now());
+  const start = logicalDayRange(config, addDays(today, -2)).start;
+  return messagesBetween(p, config, start, Date.now() + 1).slice(-limit);
 }
 
 export function messagesBefore(p: Paths, config: AppConfig, ts: number, limit = 40): ChatMessage[] {
@@ -73,13 +73,15 @@ export function messagesBefore(p: Paths, config: AppConfig, ts: number, limit = 
 }
 
 export function todayMessageCount(p: Paths, config: AppConfig): number {
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
-  return readDayMessages(p, today).filter((m) => m.role === "user").length;
+  const range = todayRange(config);
+  return messagesBetween(p, config, range.start, Date.now() + 1).filter((m) => m.role === "user").length;
 }
 
 export function todayProactiveCount(p: Paths, config: AppConfig): number {
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
-  return readDayMessages(p, today).filter((m) => m.role === "assistant" && m.meta?.proactive === true).length;
+  const range = todayRange(config);
+  return messagesBetween(p, config, range.start, Date.now() + 1).filter(
+    (m) => m.role === "assistant" && m.meta?.proactive === true,
+  ).length;
 }
 
 export function lastOwnerMessageAt(p: Paths, config: AppConfig): number {
@@ -128,13 +130,14 @@ export function toLLMHistory(messages: ChatMessage[], max: number, config?: AppC
 }
 
 export function yesterdayDigest(p: Paths, config: AppConfig): string {
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const today = logicalDayKey(config, Date.now());
   const yesterday = addDays(today, -1);
   const diary = readText(path.join(p.diary, `${yesterday}.md`));
   if (diary.trim()) {
     return diary.trim().slice(0, 1600);
   }
-  const messages = readDayMessages(p, yesterday).filter((m) => m.kind === "text");
+  const range = logicalDayRange(config, yesterday);
+  const messages = messagesBetween(p, config, range.start, range.end).filter((m) => m.kind === "text");
   if (!messages.length) return "";
   return messages
     .slice(-24)
@@ -144,7 +147,8 @@ export function yesterdayDigest(p: Paths, config: AppConfig): string {
 }
 
 export function dayTranscriptForDiary(p: Paths, config: AppConfig, day: string, limit = 120): string {
-  const messages = readDayMessages(p, day).filter((m) => m.kind === "text");
+  const range = logicalDayRange(config, day);
+  const messages = messagesBetween(p, config, range.start, range.end).filter((m) => m.kind === "text");
   return messages
     .slice(-limit)
     .map((m) => `[${formatClock(m.ts, config.behavior.timezone)}] ${m.role === "user" ? config.ownerTitle : config.name}：${m.text.replace(/\s+/g, " ")}`)
@@ -161,15 +165,15 @@ export function messagesBetween(
   startTs: number,
   endTs: number,
 ): ChatMessage[] {
-  const first = dayKey(startTs, config.behavior.rotateHour, config.behavior.timezone);
-  const last = dayKey(endTs, config.behavior.rotateHour, config.behavior.timezone);
-  const messages: ChatMessage[] = [];
-  for (let day = first; day <= last; day = addDays(day, 1)) {
-    messages.push(...readDayMessages(p, day));
+  const seen = new Map<string, ChatMessage>();
+  for (const day of candidateDayKeys(config, startTs, endTs)) {
+    for (const message of readDayMessages(p, day)) {
+      if (typeof message.ts !== "number" || message.ts < startTs || message.ts > endTs) continue;
+      const key = message.id || `${message.ts}:${message.role}:${message.text}`;
+      if (!seen.has(key)) seen.set(key, message);
+    }
   }
-  return messages
-    .filter((message) => typeof message.ts === "number" && message.ts >= startTs && message.ts <= endTs)
-    .sort((a, b) => a.ts - b.ts);
+  return [...seen.values()].sort((a, b) => a.ts - b.ts);
 }
 
 export function dayTranscriptBetween(
@@ -187,9 +191,7 @@ export function dayTranscriptBetween(
 }
 
 export function todayRange(config: AppConfig): { start: number; end: number } {
-  const key = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
-  const start = dayStartTs(key, config.behavior.rotateHour, config.behavior.timezone);
-  return { start, end: start + 86_400_000 };
+  return logicalDayRange(config, logicalDayKey(config, Date.now()));
 }
 
 /** Lightweight session metadata; the visible transcript lives in chat/*.jsonl. */
@@ -202,7 +204,7 @@ export interface SessionMeta {
 }
 
 export function ensureSession(p: Paths, config: AppConfig): SessionMeta {
-  const today = dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const today = logicalDayKey(config, Date.now());
   const file = path.join(p.sessions, `chat-${today}.json`);
   const meta: SessionMeta = {
     id: `chat-${today}`,

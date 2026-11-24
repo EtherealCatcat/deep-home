@@ -1,5 +1,5 @@
 import type { AppConfig, LifeConfig, LifeState } from "./types.js";
-import { addDays, minutesOfDay, nextClockTs, zonedParts, zonedTimeToTs } from "./time.js";
+import { addDays, dayKey, minutesOfDay, nextClockTs, zonedParts, zonedTimeToTs } from "./time.js";
 import { dayTypeLabel, isRestDay } from "./holidays.js";
 
 export type Phase = "asleep" | "waking" | "awake" | "sleepy";
@@ -128,26 +128,29 @@ export function getSchedule(config: AppConfig, now = Date.now(), life?: LifeStat
     };
   }
 
-  // 不在任何清醒区间：睡着。找下一次醒来和刚过去的入睡点。
+  // 不在任何清醒区间：睡着。日界仍停在刚结束的这一天，醒来时才翻页。
+  let previous: { day: string; wakeAt: number; sleepAt: number; sleepMin: number; wakeMin: number } | null = null;
   let next: { day: string; wakeAt: number; sleepAt: number; sleepMin: number; wakeMin: number } | null = null;
-  let previousSleepAt = 0;
   for (const day of days) {
     const range = rangeFor(config, day);
     if (range.wakeAt > now && (!next || range.wakeAt < next.wakeAt)) {
       next = { day, ...range };
     }
-    if (range.sleepAt <= now && range.sleepAt > previousSleepAt) previousSleepAt = range.sleepAt;
+    if (range.sleepAt <= now && (!previous || range.sleepAt > previous.sleepAt)) {
+      previous = { day, ...range };
+    }
   }
+  const prev = previous ?? { day: addDays(base, -1), ...rangeFor(config, addDays(base, -1)) };
   const nextWake = next ?? { day: addDays(base, 1), ...rangeFor(config, addDays(base, 1)) };
   return {
-    day: nextWake.day,
+    day: prev.day,
     wakeAt: nextWake.wakeAt,
-    sleepAt: nextWake.sleepAt,
-    awakeMs: nextWake.sleepAt - nextWake.wakeAt,
-    sleepMin: nextWake.sleepMin,
-    wakeMin: nextWake.wakeMin,
-    isRest: isRestDay(nextWake.day),
-    dayType: dayTypeLabel(nextWake.day),
+    sleepAt: prev.sleepAt,
+    awakeMs: prev.sleepAt - prev.wakeAt,
+    sleepMin: prev.sleepMin,
+    wakeMin: prev.wakeMin,
+    isRest: isRestDay(prev.day),
+    dayType: dayTypeLabel(prev.day),
     phase: "asleep",
     nextChangeAt: nextWake.wakeAt,
     woken: Boolean(life && life.wokenAt > 0 && now - life.wokenAt < WAKING_MINUTES * 60_000),
@@ -157,6 +160,52 @@ export function getSchedule(config: AppConfig, now = Date.now(), life?: LifeStat
 /** 醒来日（不是 05:00 逻辑日）。配额、自己的时间、说话次数都按它算。 */
 export function scheduleDayKey(config: AppConfig, ts = Date.now()): string {
   return getSchedule(config, ts).day;
+}
+
+/**
+ * 全局逻辑日：和作息共用同一条时间轴，醒来那一刻换日。
+ * 聊天、时间线、记忆、日记、自己的时间、用量、关系天数都用它。
+ */
+export function logicalDayKey(config: AppConfig, ts = Date.now(), life?: LifeState): string {
+  return getSchedule(config, ts, life).day;
+}
+
+/** 某个逻辑日的起止区间（醒来 → 睡下）。 */
+export function logicalDayRange(config: AppConfig, day: string): { start: number; end: number } {
+  const range = scheduleDayRange(config, day);
+  // 逻辑日从这一天的醒来开始，到下一次醒来为止：睡下后的凌晨仍属于前一天。
+  const next = scheduleDayRange(config, addDays(day, 1));
+  return { start: range.wakeAt, end: next.wakeAt };
+}
+
+/** 旧逻辑日（05:00 换日），只用于读取历史文件与迁移；新写入一律用 logicalDayKey。 */
+export function legacyDayKey(config: AppConfig, ts = Date.now()): string {
+  return dayKey(ts, config.behavior.rotateHour, config.behavior.timezone);
+}
+
+/**
+ * 读写区间时可能落在哪些“日文件”里：新文件按逻辑日命名，旧文件按 legacy 日命名，
+ * 两边各放宽两天，避免跨作息、跨周末时漏读。
+ */
+export function candidateDayKeys(config: AppConfig, startTs: number, endTs: number): string[] {
+  const safeEnd = Math.max(startTs, endTs - 1);
+  const names = new Set<string>();
+  for (const base of [logicalDayKey(config, startTs), logicalDayKey(config, safeEnd)]) {
+    for (let offset = -2; offset <= 2; offset += 1) names.add(addDays(base, offset));
+  }
+  for (const base of [legacyDayKey(config, startTs), legacyDayKey(config, safeEnd)]) {
+    for (let offset = -2; offset <= 2; offset += 1) names.add(addDays(base, offset));
+  }
+  // 区间跨多天时，把中间的日子也带上（两端各多算一天）。
+  const logicalLast = logicalDayKey(config, safeEnd);
+  for (let day = logicalDayKey(config, startTs); day <= logicalLast; day = addDays(day, 1)) {
+    names.add(day);
+  }
+  const legacyLast = legacyDayKey(config, safeEnd);
+  for (let day = legacyDayKey(config, startTs); day <= legacyLast; day = addDays(day, 1)) {
+    names.add(day);
+  }
+  return [...names].sort();
 }
 
 /** 最近一次已经睡下的时刻；跨周末时可能落在两天前。 */

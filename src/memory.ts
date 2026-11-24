@@ -2,7 +2,8 @@ import path from "node:path";
 import type { AppConfig } from "./types.js";
 import type { Paths } from "./config.js";
 import { backupFile, ensureDir, listFiles, readText, writeText } from "./store.js";
-import { dayKey, formatClock } from "./time.js";
+import { formatClock } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 
 const OWNER_SEED = `# 关于主人
 
@@ -106,7 +107,7 @@ export class MemoryStore {
     return path.join(this.p.topics, `${title.replace(/[\\/:*?"<>|]/g, "-")}.md`);
   }
 
-  appendTopic(title: string, text: string, date = dayKey(Date.now(), this.config.behavior.rotateHour, this.config.behavior.timezone)): void {
+  appendTopic(title: string, text: string, date = logicalDayKey(this.config, Date.now())): void {
     const file = this.topicFile(title);
     const existing = readText(file);
     const heading = `## ${date} · ${title}`;
@@ -129,7 +130,7 @@ export class MemoryStore {
       this.appendTopic(topic, clean);
       return;
     }
-    const day = dayKey(Date.now(), this.config.behavior.rotateHour, this.config.behavior.timezone);
+    const day = logicalDayKey(this.config, Date.now());
     const file = path.join(this.p.memoryInbox, `${day}.md`);
     const existing = readText(file);
     const line = `- [${formatClock(Date.now(), this.config.behavior.timezone)}] （${about}）${clean}`;
@@ -199,7 +200,7 @@ export class MemoryStore {
     for (const file of diaryFiles) {
       const raw = readText(file);
       const date = path.basename(file, ".md");
-      const recent = date >= dayKey(Date.now() - 7 * 86_400_000, this.config.behavior.rotateHour, this.config.behavior.timezone) ? 0.6 : 0;
+      const recent = date >= logicalDayKey(this.config, Date.now() - 7 * 86_400_000) ? 0.6 : 0;
       for (const para of raw.split(/\n{2,}/)) {
         const text = para.replace(/^#+\s*/gm, "").trim();
         if (!text) continue;

@@ -22,9 +22,9 @@ import { appendChatMessage, planRetry, recentMessages, removeUserMessagesSince }
 import { addReminder, cancelReminder, loadReminders, markReminderDone, parseDue } from "./care.js";
 import { listDiaries, readDiary, yesterdayKey } from "./diaryStore.js";
 import { diarySlotSnapshot, diaryTarget, diaryTargetForDay, writeDiary } from "./diary.js";
-import { getSchedule, isQuietHours, lastSleepAtBefore, nextWakeAt, validateLifeConfig } from "./schedule.js";
+import { getSchedule, isQuietHours, lastSleepAtBefore, logicalDayKey, logicalDayRange, nextWakeAt, validateLifeConfig } from "./schedule.js";
 import { consolidateMemory, hasInbox, readConsolidateState } from "./consolidate.js";
-import { appendTimeline, readTimeline, readTimelineForDisplay } from "./timeline.js";
+import { appendTimeline, readTimelineBetween, readTimelineForDisplay } from "./timeline.js";
 import { loadDeferred, loadLife, saveLife } from "./life.js";
 import { todayUsage } from "./usage.js";
 import { MODEL_PRICES, costPolicy, normalizePeakWindows, peakInfo } from "./pricing.js";
@@ -35,13 +35,22 @@ import { avatarFile, avatarInfo, clearAvatar, saveAvatar } from "./avatar.js";
 import { loadOwn, markOwnSeen, ownStateSnapshot, reconcileOwnAfterScheduleChange, saveOwn } from "./own.js";
 import { readOwnLog } from "./web.js";
 import { isAllowedOrigin, isLoopbackOrigin, isRequestOriginAllowed } from "./security.js";
+import { readDayBoundary, writeDayBoundary } from "./dayBoundary.js";
 import { backupFile, exists, listFiles, readText, writeText } from "./store.js";
-import { dayKey, formatClock, nextClockTs, weekdayCN } from "./time.js";
+import { formatClock, nextClockTs, weekdayCN } from "./time.js";
 import type { ServerEvent } from "./events.js";
 
 const root = dataRoot();
 const p = paths(root);
 ensureLayout(p);
+
+// 旧数据还在用 05:00 的日界；应用现在写入作息逻辑日，读取同时兼容两边。
+if (readDayBoundary(p).mode === "legacy") {
+  const hasOldFiles = listFiles(p.chat, ".jsonl").length > 0 || listFiles(p.timeline, ".jsonl").length > 0;
+  writeDayBoundary(p, hasOldFiles ? "dual" : "logical", {
+    note: hasOldFiles ? "新数据按作息逻辑日写入，旧文件继续可读。" : "新数据按作息逻辑日写入。",
+  });
+}
 
 const firstRun = !exists(p.config);
 let config = loadConfig(p);
@@ -139,7 +148,7 @@ function requireObject(body: unknown): Record<string, unknown> {
 
 function paramDay(params: unknown): string {
   const day = String((params as { day?: string }).day ?? "");
-  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  return /^\d{4}-\d{2}-\d{2}$/.test(day) ? day : logicalDayKey(config, Date.now());
 }
 
 // ---------- status & realtime ----------
@@ -430,7 +439,7 @@ app.post("/api/diary/write", async (request) => {
 
 app.get("/api/timeline", async (request) => {
   const query = request.query as { day?: string };
-  const day = query.day && /^\d{4}-\d{2}-\d{2}$/.test(query.day) ? query.day : dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const day = query.day && /^\d{4}-\d{2}-\d{2}$/.test(query.day) ? query.day : logicalDayKey(config, Date.now());
   return { day, events: readTimelineForDisplay(p, config, day), heading: `${day} · ${weekdayCN(day)}` };
 });
 
@@ -542,7 +551,7 @@ app.post("/api/own/seen", async () => {
 app.get("/api/own/log", async (request, reply) => {
   const query = request.query as { day?: string };
   const raw = String(query.day ?? "").trim();
-  const day = raw || dayKey(Date.now(), config.behavior.rotateHour, config.behavior.timezone);
+  const day = raw || logicalDayKey(config, Date.now());
   if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) {
     return reply.code(400).send({ error: "日期格式不对。" });
   }
@@ -566,7 +575,10 @@ app.get("/api/debug", async () => {
       lastError: readConsolidateState(p),
     },
     usage: todayUsage(p, config),
-    timeline: readTimeline(p, dayKey(now, config.behavior.rotateHour, config.behavior.timezone)).slice(-20),
+    timeline: (() => {
+      const range = logicalDayRange(config, logicalDayKey(config, now));
+      return readTimelineBetween(p, config, range.start, Math.min(now, range.end)).slice(-20);
+    })(),
     lastTurn: agent.getDebug(),
     lastLlmError: getLastLLMFailure(),
     provider: providerSnapshot(),

@@ -13,7 +13,8 @@ import { loadRelationship, saveRelationship, updateStreak } from "./relationship
 import { loadReminders, pendingReminders } from "./care.js";
 import { listStickers, ensureStickers, findSticker } from "./stickers.js";
 import { appendChatMessage, messagesBefore, quoteLine, toLLMHistory, yesterdayDigest, todayMessageCount, todayProactiveCount, lastOwnerMessageAt, ensureSession } from "./chat.js";
-import { dayKey, formatClock, nextClockTs } from "./time.js";
+import { formatClock, nextClockTs } from "./time.js";
+import { logicalDayKey } from "./schedule.js";
 import { timelineSummary, appendTimeline } from "./timeline.js";
 import { costPolicy, isPeak } from "./pricing.js";
 import { todayUsage, recordUsage } from "./usage.js";
@@ -233,7 +234,7 @@ export class ChatAgent {
       }
 
       const now = Date.now();
-      const day = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
+      const day = logicalDayKey(config, now);
       const usage = todayUsage(paths, config);
       const policy = costPolicy(config, usage, now);
       const historyLimit = Math.max(1, policy.historyMessages);
@@ -439,7 +440,7 @@ export class ChatAgent {
         return { ok: false, summary: "", shares: [], error: policy.reason };
       }
 
-      const day = dayKey(now, config.behavior.rotateHour, config.behavior.timezone);
+      const day = logicalDayKey(config, now);
       const relationship = loadRelationship(paths, config);
       const rhythm = getRhythm(config, loadLife(paths), now);
       const mood = loadMood(paths, config);

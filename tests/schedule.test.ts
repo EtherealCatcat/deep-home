@@ -12,7 +12,6 @@ import {
   scheduleDayRange,
   validateLifeConfig,
 } from "../src/schedule.js";
-import { addDays } from "../src/time.js";
 
 const config = structuredClone(DEFAULT_CONFIG);
 
@@ -43,8 +42,8 @@ describe("schedule", () => {
     expect(getSchedule(config, ts("2026-11-18T23:50:00+08:00")).phase).toBe("sleepy");
   });
 
-  it("maps timestamps before the waking time to the upcoming day", () => {
-    expect(scheduleDayKey(config, ts("2026-11-18T02:00:00+08:00"))).toBe("2026-11-18");
+  it("keeps timestamps before the waking time on the previous day", () => {
+    expect(scheduleDayKey(config, ts("2026-11-18T02:00:00+08:00"))).toBe("2026-11-17");
     expect(scheduleDayKey(config, ts("2026-11-18T10:00:00+08:00"))).toBe("2026-11-18");
     expect(nextWakeAt(config, ts("2026-11-18T02:00:00+08:00"))).toBe(ts("2026-11-18T08:00:00+08:00"));
   });
@@ -130,7 +129,11 @@ describe("schedule", () => {
   it("does not depend on the legacy rotate hour for the schedule day", () => {
     const late = structuredClone(config);
     late.behavior.rotateHour = 3;
-    expect(scheduleDayKey(late, ts("2026-11-18T02:00:00+08:00"))).toBe("2026-11-18");
-    expect(scheduleDayKey(late, ts("2026-11-18T02:00:00+08:00"))).not.toBe(addDays("2026-11-18", -1));
+    const early = structuredClone(config);
+    early.behavior.rotateHour = 5;
+    expect(scheduleDayKey(late, ts("2026-11-18T06:00:00+08:00"))).toBe("2026-11-17");
+    expect(scheduleDayKey(late, ts("2026-11-18T06:00:00+08:00"))).toBe(
+      scheduleDayKey(early, ts("2026-11-18T06:00:00+08:00")),
+    );
   });
 });
