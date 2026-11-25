@@ -4,11 +4,17 @@
 
 当前主线为 `main`（2026-11-20）。后续并行功能分支请从最新 `main` 拉出，合并时把条目补到下一个版本。
 
-## [Unreleased]
+## [0.6.1] - 2026-11-25
 
 ### 变更
 
-- 版本号改为单一来源：`package.json` 是唯一入口，`npm run version:sync` 同步 `src/version.ts` 与 `src-tauri/Cargo.toml`，`tauri.conf.json` 直接指向根 `package.json`；CI 增加 `version:check`。
+- **版本号改为单一来源**：`package.json` 是唯一入口，`npm run version:sync` 生成 `src/version.ts` 并同步 `src-tauri/Cargo.toml`，`src-tauri/tauri.conf.json` 直接指向根 `package.json`；`server.ts`（health、debug）与 `web.ts`（User-Agent）都从 `src/version.ts` 读取，不再各写一份。
+- **CI 增加版本校验**：workflow 在 typecheck 之前先跑 `npm run version:check`，`src/version.ts`、`Cargo.toml`、`tauri.conf.json`、`server.ts`、`web.ts` 任何一处漂移都会直接失败；本地也可以用同一条命令自查。
+- 版本统一到 `0.6.1`（package、lock、Cargo、Tauri、health、User-Agent）。
+
+### 修复
+
+- **出站 User-Agent 真的带上版本号**：上一版把它写成了普通双引号字符串，`${APP_VERSION}` 会被原样发出去；现在改用模板字符串，版本一致性测试也改为要求模板写法，避免同类问题再次通过。
 
 ## [0.6.0] - 2026-11-25
 

@@ -230,6 +230,8 @@ npm run dev           # 服务端 + Web 热更新
 npm run tauri:dev     # Tauri 原生窗口
 npm run tauri:build:p5 # 打包 .app/.dmg（未签名）
 npm run migrate:days   # 把旧的 05:00 逻辑日文件迁到作息逻辑日（dry-run，加 -- --apply 才写入）
+npm run version:sync   # 发版时改完 package.json 后，同步 src/version.ts 与 Cargo.toml
+npm run version:check  # 校验各处版本一致（CI 也会先跑这一步）
 ```
 
 ## 更新记录
