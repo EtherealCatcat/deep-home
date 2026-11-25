@@ -6,6 +6,7 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import type { AppConfig, QuoteRef } from "./types.js";
 import { dataRoot, deepMerge, ensureLayout, loadConfig, maskConfig, paths, saveConfig } from "./config.js";
+import { APP_VERSION } from "./version.js";
 import { MemoryStore } from "./memory.js";
 import { ChatAgent } from "./agent.js";
 import { Scheduler } from "./scheduler.js";
@@ -153,7 +154,6 @@ function paramDay(params: unknown): string {
 
 // ---------- status & realtime ----------
 
-const APP_VERSION = "0.6.0";
 
 app.get("/api/health", async () => ({
   ok: true,

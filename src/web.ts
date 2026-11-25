@@ -9,6 +9,7 @@ import type { Paths } from "./config.js";
 import { appendText, ensureDir, readText, writeText } from "./store.js";
 import { formatClock } from "./time.js";
 import { logicalDayKey } from "./schedule.js";
+import { APP_VERSION } from "./version.js";
 
 const MAX_BYTES = 2_500_000;
 const MAX_CHARS = 7000;
@@ -126,7 +127,7 @@ export async function fetchText(
       redirect: "manual",
       signal,
       headers: {
-        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 DeepHome/0.6.0",
+        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 DeepHome/${APP_VERSION}",
         accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
       },
     });

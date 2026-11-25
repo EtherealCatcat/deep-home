@@ -71,7 +71,7 @@ npm run tauri:build:p5    # .app + .dmg
 
 ```
 src-tauri/target/release/bundle/macos/DeepHome.app
-src-tauri/target/release/bundle/dmg/DeepHome_0.6.0_aarch64.dmg
+src-tauri/target/release/bundle/dmg/DeepHome_<version>_aarch64.dmg
 ```
 
 应用启动时会：

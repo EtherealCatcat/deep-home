@@ -4,6 +4,12 @@
 
 当前主线为 `main`（2026-11-20）。后续并行功能分支请从最新 `main` 拉出，合并时把条目补到下一个版本。
 
+## [Unreleased]
+
+### 变更
+
+- 版本号改为单一来源：`package.json` 是唯一入口，`npm run version:sync` 同步 `src/version.ts` 与 `src-tauri/Cargo.toml`，`tauri.conf.json` 直接指向根 `package.json`；CI 增加 `version:check`。
+
 ## [0.6.0] - 2026-11-25
 
 ### 新增
