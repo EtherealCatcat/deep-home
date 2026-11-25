@@ -315,6 +315,7 @@ export class ChatAgent {
         memory,
         now,
         outbox,
+        onTimeline: (event) => this.emit({ type: "timeline", event }),
       };
 
       const result = await runToolLoop({
@@ -518,6 +519,7 @@ export class ChatAgent {
         outbox,
         tellOwner,
         catchUp: Boolean(opts.catchUp),
+        onTimeline: (event) => this.emit({ type: "timeline", event }),
       };
       const result = await runToolLoop({
         config,

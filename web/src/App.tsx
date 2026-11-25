@@ -32,6 +32,7 @@ export default function App() {
   const [avatar, setAvatar] = useState(DEFAULT_AVATAR);
   const [avatarCustom, setAvatarCustom] = useState(false);
   const [connected, setConnected] = useState(false);
+  const [timelineTick, setTimelineTick] = useState(0);
   const [toast, setToast] = useState<{ text: string; kind: ToastKind } | null>(null);
   const toastTimer = useRef<number | null>(null);
   const pageRef = useRef<Page>(page);
@@ -202,6 +203,9 @@ export default function App() {
             showToast(data.message, "error");
           }
           break;
+        case "timeline":
+          setTimelineTick((value) => value + 1);
+          break;
         case "diary":
           showToast("她写完了今天的日记。");
           void notifyDiary();
@@ -334,7 +338,7 @@ export default function App() {
             onRetry={retryChat}
           />
         ) : page === "today" ? (
-          <TodayView status={status} showToast={showToast} />
+          <TodayView status={status} showToast={showToast} timelineTick={timelineTick} />
         ) : page === "memory" ? (
           <MemoryView showToast={showToast} />
         ) : page === "diary" ? (

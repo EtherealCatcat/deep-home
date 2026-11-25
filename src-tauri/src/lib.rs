@@ -322,6 +322,15 @@ pub fn run() {
         .inner_size(1180.0, 780.0)
         .min_inner_size(900.0, 620.0)
         .center()
+        .on_new_window(|url, _features| {
+          // 只允许公开 http/https；前端也做了一次 scheme 校验。
+          if matches!(url.scheme(), "http" | "https") {
+            if let Err(error) = Command::new("/usr/bin/open").arg(url.as_str()).spawn() {
+              eprintln!("failed to open external url: {error}");
+            }
+          }
+          tauri::webview::NewWindowResponse::Deny
+        })
         .build()?;
 
       let window_handle = window.clone();

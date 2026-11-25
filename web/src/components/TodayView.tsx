@@ -20,8 +20,11 @@ import {
   X,
 } from "lucide-react";
 import { api, formatDay, formatTime, relativeTime } from "../api";
-import type { Reminder, Status, TimelineEvent } from "../types";
+import type { Reminder, Status, TimelineEvent, TimelineLink } from "../types";
 import { Badge, Card, SectionTitle } from "./ui";
+
+const LINK_CLASS =
+  "text-sea underline decoration-sea/40 underline-offset-2 transition-colors hover:text-coral-deep hover:decoration-coral/60";
 
 const eventMeta: Record<string, { icon: typeof Sun; tone: string }> = {
   chat: { icon: MessageCircle, tone: "text-sea" },
@@ -63,9 +66,58 @@ function OwnCard({ status }: { status: Status }) {
   );
 }
 
+function safeHttpUrl(raw: unknown): string | null {
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
+function safeLink(link: TimelineLink | undefined): TimelineLink | null {
+  if (!link || typeof link.url !== "string" || typeof link.title !== "string") return null;
+  if (!link.title) return null;
+  const url = safeHttpUrl(link.url);
+  return url ? { url, title: link.title } : null;
+}
+
+function LinkedReadText({ text, link }: { text: string; link: TimelineLink }) {
+  // 从第一个《之后找标题，避免单字标题（如「读」「了」）误匹配“读了”前缀。
+  const open = text.indexOf("《");
+  const at = open >= 0 ? text.indexOf(link.title, open + 1) : -1;
+  const anchor = (children: string) => (
+    <a
+      href={link.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      className={LINK_CLASS}
+      title="在默认浏览器打开原文"
+    >
+      {children}
+    </a>
+  );
+
+  if (at >= 0) {
+    return (
+      <>
+        {text.slice(0, at)}
+        {anchor(link.title)}
+        {text.slice(at + link.title.length)}
+      </>
+    );
+  }
+
+  // 兜底：标题和 text 对不上（手工数据/未来文案变化）时整段可点，至少不丢链接。
+  return anchor(text);
+}
+
 function EventRow({ event }: { event: TimelineEvent }) {
   const meta = eventMeta[event.kind] ?? { icon: Sun, tone: "text-ink-faint" };
   const Icon = meta.icon;
+  const link = event.kind === "read" ? safeLink(event.link) : null;
   return (
     <div className="relative flex gap-3 pb-5 pl-1 last:pb-0">
       <div className="relative z-10 mt-0.5 grid h-7 w-7 shrink-0 place-items-center rounded-full border border-line/70 bg-paper-light">
@@ -75,7 +127,7 @@ function EventRow({ event }: { event: TimelineEvent }) {
         <div className="flex items-baseline gap-2">
           <span className="tabular shrink-0 text-[10.5px] text-ink-faint">{formatTime(event.ts)}</span>
           <span className="line-clamp-2 break-words text-[12.5px] text-ink" title={event.text}>
-            {event.text}
+            {link ? <LinkedReadText text={event.text} link={link} /> : event.text}
           </span>
         </div>
         {event.meta && Object.keys(event.meta).length > 0 ? (
@@ -188,7 +240,15 @@ function ReminderRow({
   );
 }
 
-export function TodayView({ status, showToast }: { status: Status | null; showToast: (text: string, kind?: "info" | "error") => void }) {
+export function TodayView({
+  status,
+  showToast,
+  timelineTick = 0,
+}: {
+  status: Status | null;
+  showToast: (text: string, kind?: "info" | "error") => void;
+  timelineTick?: number;
+}) {
   const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [heading, setHeading] = useState("");
   const [reminders, setReminders] = useState<Reminder[]>([]);
@@ -211,8 +271,9 @@ export function TodayView({ status, showToast }: { status: Status | null; showTo
   }
 
   useEffect(() => {
-    void load();
-  }, [status?.lastMessageAt, status?.lastOwnerAt]);
+    const timer = window.setTimeout(() => void load(), 180);
+    return () => window.clearTimeout(timer);
+  }, [status?.lastMessageAt, status?.lastOwnerAt, timelineTick]);
 
   async function addReminder() {
     if (!newText.trim() || !newDue.trim() || adding) return;

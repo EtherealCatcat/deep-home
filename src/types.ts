@@ -203,11 +203,20 @@ export interface OwnTimeState {
   updatedAt: number;
 }
 
+export interface TimelineLink {
+  /** 跟随重定向后的最终地址；webRead 已保证是公开 http/https。 */
+  url: string;
+  /** 页面标题，和 text 里的标题保持一致。 */
+  title: string;
+}
+
 export interface TimelineEvent {
   ts: number;
   kind: string;
   text: string;
   meta?: Record<string, unknown>;
+  /** 可点击的原文链接；目前只有 web_read 产生的 read 事件会带。 */
+  link?: TimelineLink;
 }
 
 export interface Reminder {

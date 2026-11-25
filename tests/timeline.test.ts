@@ -88,3 +88,30 @@ describe("timeline ordering", () => {
     expect(summary).not.toContain("十点以后");
   });
 });
+
+describe("timeline links", () => {
+  it("keeps the article link through append, read and grouping", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "deephome-timeline-link-"));
+    const p = paths(root);
+    ensureLayout(p);
+    try {
+      const link = {
+        url: "https://sspai.com/post/86123",
+        title: "怀旧日记 | Palm Pre：内藏「划时代」系统的手机",
+      };
+      appendTimeline(p, config, {
+        kind: "read",
+        text: `读了《${link.title}》`,
+        ts: at(0),
+        link,
+      });
+
+      const events = readTimeline(p, "2026-11-18");
+      expect(events).toHaveLength(1);
+      expect(events[0].link).toEqual(link);
+      expect(groupTimelineEvents(events, config)[0].link).toEqual(link);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

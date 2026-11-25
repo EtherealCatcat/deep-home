@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import type { AppConfig, SceneKind } from "./types.js";
+import type { AppConfig, SceneKind, TimelineEvent } from "./types.js";
 import type { Paths } from "./config.js";
 import type { MemoryStore } from "./memory.js";
 import { addReminder, markReminderDone, parseDue, pendingReminders, remindersText } from "./care.js";
@@ -31,6 +31,8 @@ export interface ToolContext {
   tellOwner?: (text: string) => string;
   /** 补跑：现在是“原计划时刻”，用来拒绝算不出绝对时间的说法。 */
   catchUp?: boolean;
+  /** 时间线新增事件时通知上层，用于 SSE / 今天页实时刷新。 */
+  onTimeline?: (event: TimelineEvent) => void;
 }
 
 interface ToolDefinition {
@@ -271,7 +273,14 @@ const TOOLS: ToolDefinition[] = [
     async run(ctx, args) {
       if (!ctx.config.web.enabled) return "今天网络关着，改天再看吧。";
       const page = await webRead(str(args, "url"));
-      appendTimeline(ctx.paths, ctx.config, { kind: "read", text: `读了《${page.title}》`, ts: ctx.now });
+      const event: TimelineEvent = {
+        ts: ctx.now,
+        kind: "read",
+        text: `读了《${page.title}》`,
+        link: { url: page.url, title: page.title },
+      };
+      appendTimeline(ctx.paths, ctx.config, event);
+      ctx.onTimeline?.(event);
       return wrapUntrusted(page.title, page.url, page.text.slice(0, 5000));
     },
   },
