@@ -127,7 +127,7 @@ export async function fetchText(
       redirect: "manual",
       signal,
       headers: {
-        "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 DeepHome/${APP_VERSION}",
+        "user-agent": `Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 DeepHome/${APP_VERSION}`,
         accept: "text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.5",
       },
     });

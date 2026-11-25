@@ -112,8 +112,9 @@ if (!server.includes('from "./version.js"') || /const\s+APP_VERSION\s*=/.test(se
   problems.push("src/server.ts 必须从 ./version.js 导入 APP_VERSION，且不能再自己声明");
 }
 
-if (!web.includes("DeepHome/${APP_VERSION}") || /DeepHome\/\d/.test(web)) {
-  problems.push("src/web.ts 的 User-Agent 必须使用 DeepHome/${APP_VERSION}，不能硬编码版本号");
+const webUsesTemplate = /"user-agent":\s*`[^`]*DeepHome\/\$\{APP_VERSION\}[^`]*`/.test(web);
+if (!webUsesTemplate || /DeepHome\/\d/.test(web)) {
+  problems.push("src/web.ts 的 User-Agent 必须用模板字符串写成 DeepHome/${APP_VERSION}，不能硬编码版本号");
 }
 
 if (problems.length) {

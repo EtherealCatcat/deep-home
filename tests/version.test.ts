@@ -17,7 +17,8 @@ describe("version single source", () => {
 
   it("builds the outbound User-Agent from APP_VERSION", () => {
     const web = fs.readFileSync(path.join(root, "src/web.ts"), "utf8");
-    expect(web).toContain("DeepHome/${APP_VERSION}");
+    // 必须是模板字符串：双引号里的 ${APP_VERSION} 只会被原样发出去。
+    expect(web).toMatch(/"user-agent":\s*`[^`]*DeepHome\/\$\{APP_VERSION\}[^`]*`/);
     expect(web).not.toMatch(/DeepHome\/\d/);
   });
 
