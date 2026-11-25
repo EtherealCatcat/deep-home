@@ -1,6 +1,6 @@
 {
   "name": "deep-home",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "private": true,
   "type": "module",
   "description": "A local, file-based companion who lives in a little room on your Mac.",
