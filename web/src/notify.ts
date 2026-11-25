@@ -32,16 +32,16 @@ function listenForClicks(): void {
 }
 
 /**
- * 用户点叉号时 Rust 侧只是把窗口隐藏，webview 还活着、SSE 还在跑；
- * 这种状态按“窗口已关闭”处理，不要弹任何通知。
+ * 窗口可见时只在应用内提示（未读角标、聊天页实时渲染、日记页 toast）；
+ * 用户点叉号后 Rust 侧只是把窗口隐藏，webview 与 SSE 还活着，这时才走系统通知。
  */
-async function windowVisible(): Promise<boolean> {
-  if (!isTauri()) return true;
+async function windowHidden(): Promise<boolean> {
+  if (!isTauri()) return false;
   try {
     const { getCurrentWindow } = await import("@tauri-apps/api/window");
-    return await getCurrentWindow().isVisible();
+    return !(await getCurrentWindow().isVisible());
   } catch {
-    // 查不到可见性时宁可安静：需求是“窗口关掉后不打扰”。
+    // 查不到可见性时别打扰。
     return false;
   }
 }
@@ -86,7 +86,7 @@ export async function notifyMessage(text: string): Promise<void> {
   if (!enabled || (!granted && !native)) return;
   const body = text.trim().slice(0, 160);
   if (!body) return;
-  if (!(await windowVisible())) return;
+  if (!(await windowHidden())) return;
   try {
     await deliver(characterName, body, "chat");
   } catch (error) {
@@ -96,7 +96,7 @@ export async function notifyMessage(text: string): Promise<void> {
 
 export async function notifyDiary(): Promise<void> {
   if (!enabled || (!granted && !native)) return;
-  if (!(await windowVisible())) return;
+  if (!(await windowHidden())) return;
   try {
     await deliver(characterName, "她写好了今天的日记，快来看看吧", "diary");
   } catch (error) {

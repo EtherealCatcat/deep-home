@@ -39,7 +39,7 @@ describe("notifications", () => {
   beforeEach(() => {
     invoke.mockClear();
     isVisible.mockClear();
-    isVisible.mockResolvedValue(true);
+    isVisible.mockResolvedValue(false);
     sendNotification.mockClear();
     setNotificationsEnabled(true);
     setCharacterName("鲸鲸");
@@ -58,8 +58,14 @@ describe("notifications", () => {
     expect(nativeCalls()[0]?.[1]).toMatchObject({ title: "阿鲸", body: "我回来啦" });
   });
 
-  it("says nothing while the window is closed", async () => {
-    isVisible.mockResolvedValue(false);
+  it("notifies while the window is closed", async () => {
+    await notifyMessage("在吗");
+    await notifyDiary();
+    expect(nativeCalls()).toHaveLength(2);
+  });
+
+  it("stays quiet while the window is visible", async () => {
+    isVisible.mockResolvedValue(true);
     await notifyMessage("在吗");
     await notifyDiary();
     expect(nativeCalls()).toHaveLength(0);
